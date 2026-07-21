@@ -56,12 +56,11 @@ describe('writes', () => {
     });
     expect(res.isError).toBeFalsy();
 
-    const remote = await git(['show', 'main:Projects/Alpha.md'], fx.bareDir);
     const expected = SEED_NOTES['Projects/Alpha.md']!.replace(
       'Alpha is in flight.',
       'Alpha has shipped.',
     );
-    expect(`${remote}\n`).toBe(expected);
+    expect(await fx.remoteFile('Projects/Alpha.md')).toBe(expected);
   });
 
   it('update_frontmatter updates the field and leaves the body byte-identical', async () => {
@@ -72,7 +71,7 @@ describe('writes', () => {
     });
     expect(res.isError).toBeFalsy();
 
-    const remote = `${await git(['show', 'main:Projects/Alpha.md'], fx.bareDir)}\n`;
+    const remote = await fx.remoteFile('Projects/Alpha.md');
     const seedBody = SEED_NOTES['Projects/Alpha.md']!.split('---\n')[2]!;
     expect(remote.endsWith(seedBody)).toBe(true);
     expect(remote).toContain('status: done');

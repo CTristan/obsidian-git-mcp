@@ -4,8 +4,8 @@ import { callTool, commitShaOf, startServer, type TestServer } from '../helpers.
 
 const ALPHA = 'Projects/Alpha.md';
 
-async function remoteAlpha(fx: Fixture): Promise<string> {
-  return `${await git(['show', `main:${ALPHA}`], fx.bareDir)}\n`;
+function remoteAlpha(fx: Fixture): Promise<string> {
+  return fx.remoteFile(ALPHA);
 }
 
 describe('append_to_section', () => {

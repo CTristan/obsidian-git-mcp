@@ -106,7 +106,7 @@ describe('transaction safety', () => {
     expect(textOf(res).toLowerCase()).toContain('conflict');
 
     // The collaborator's version survives untouched on the remote.
-    expect(await git(['show', 'main:Projects/Alpha.md'], fx.bareDir)).toBe(collabVersion.trimEnd());
+    expect(await fx.remoteFile('Projects/Alpha.md')).toBe(collabVersion);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
   });

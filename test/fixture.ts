@@ -57,6 +57,11 @@ export interface Fixture {
   collabWrite(path: string, content: string, message: string): Promise<string>;
   /** git log of the bare remote's main, newest first. */
   bareLog(format: string, limit?: number): Promise<string[]>;
+  /**
+   * Exact bytes of a file on the remote's main. Deliberately avoids the trimming git()
+   * helper, because byte-identity assertions must see trailing-newline corruption.
+   */
+  remoteFile(path: string): Promise<string>;
   cleanup(): Promise<void>;
 }
 
@@ -104,6 +109,13 @@ export async function createFixture(): Promise<Fixture> {
     async bareLog(format, limit = 20) {
       const out = await git(['log', `--format=${format}`, `-n`, String(limit), 'main'], bareDir);
       return out === '' ? [] : out.split('\n');
+    },
+    async remoteFile(path) {
+      const { stdout } = await exec('git', ['cat-file', 'blob', `main:${path}`], {
+        cwd: bareDir,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      });
+      return stdout;
     },
     async cleanup() {
       await rm(root, { recursive: true, force: true });
