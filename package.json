@@ -1,0 +1,34 @@
+{
+  "name": "obsidian-git-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for git-backed Obsidian vaults — every write is a validated, atomic git commit pushed to the canonical remote",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "obsidian-git-mcp": "./dist/cli.js"
+  },
+  "exports": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "packageManager": "pnpm@10.20.0",
+  "dependencies": {
+    "@bitbonsai/mcpvault": "0.12.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "gray-matter": "4.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,43 @@
+# CodeRabbit configuration.
+#
+# This repository's conventions live in human-first docs (README.md + CONTRIBUTING.md); these
+# patterns tell CodeRabbit to apply them as review criteria. They are ADDED on top of
+# CodeRabbit's defaults (which already include **/CLAUDE.md and .github/copilot-instructions.md).
+#
+# README.md and CONTRIBUTING.md are listed explicitly because CodeRabbit reads guideline files
+# literally and does NOT expand CLAUDE.md's @imports. Exact root paths (not **/README.md) avoid
+# matching nested committed READMEs.
+
+# Inherit organization-level UI settings (e.g. the review profile) for any field this file
+# omits. Without this, a present .coderabbit.yaml pins every unspecified field to its schema
+# default. See https://docs.coderabbit.ai/configuration/configuration-inheritance.
+inheritance: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "README.md"
+      - "CONTRIBUTING.md"
+
+reviews:
+  path_instructions:
+    - path: "README.md"
+      instructions: |
+        Review for human readability — a first-time USER must be able to install, configure, and
+        run the server from this (it also doubles as agent instructions, but optimize for users).
+        Prefer short active sentences that survive machine translation. Flag a passage only when it
+        genuinely blocks the reader from acting — wordiness that buries a required step, or a run-on
+        sentence a non-developer can't follow — never merely-tightenable or idiomatic technical
+        prose. Also flag a missing user-facing step (install, configure, run) or a broken
+        cross-reference.
+    - path: "CONTRIBUTING.md"
+      instructions: |
+        Review for human readability — a developer contributing to this TypeScript/Node repo must
+        be able to act on it. Technical MCP/git/tooling terms (stdio transport, bare remote,
+        fast-forward, rebase, execFile) are expected — never flag them as jargon. Flag a passage
+        only when it genuinely blocks a contributor: a load-bearing term used without defining it
+        or linking to a definition, or padding that buries a required step. Correct idiomatic
+        phrasing — including standard passive voice like "dependencies are exact-pinned" — is fine;
+        don't suggest tightening prose that already works. Also flag a missing load-bearing step
+        (setup, build/test, conventions) or a broken cross-reference.
