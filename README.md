@@ -42,6 +42,13 @@ Example Claude Code registration:
 claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- obsidian-git-mcp /path/to/vault-checkout
 ```
 
-## Status
+## Status: the spike's verdict
 
-Phase 1 spike: the contract-test suite and transaction wrapper are being built TDD-first to decide whether MCPVault stays the underlying tool surface. The verdict and its rationale will be recorded here.
+MCPVault stays. The contract suite (34 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
+
+Two quirks worth knowing, neither disqualifying:
+
+- `update_frontmatter` preserves sibling keys and their data but normalizes flow-style whitespace (`[project]` becomes `[ project ]`), so frontmatter updates are semantically targeted, not byte-targeted. The note body stays byte-identical.
+- `patch_note` is exact-string replace (`oldString`/`newString`), not heading-targeted. That works well in practice, because agents read a note before editing it, and reproducing exact bytes is more reliable for them than heading arithmetic.
+
+`get_backlinks` and `resolve_wikilink` are tracked in [#2](https://github.com/CTristan/obsidian-git-mcp/issues/2).
