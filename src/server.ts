@@ -186,6 +186,17 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     name: string,
     args: Record<string, unknown>,
   ): Promise<CallToolResult> => {
+    // Preflight the path arguments before anything touches MCPVault — the path-filter
+    // layer must refuse on its own, not lean on the post-mutation transaction check.
+    for (const key of ['path', 'oldPath', 'newPath']) {
+      const value = args[key];
+      if (typeof value === 'string') {
+        const reason = forbiddenPathReason(value);
+        if (reason) {
+          return errorResult(`${value}: ${reason}`);
+        }
+      }
+    }
     let result: CallToolResult | undefined;
     const sha = await transactor.transact(commitMessageFor(name, args), async () => {
       result = await callInner(name, args);
@@ -263,6 +274,12 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (name === 'list_recent_changes') {
         const limit = Math.min(Math.max(Number(args['limit'] ?? 20) || 20, 1), 200);
         const path = typeof args['path'] === 'string' ? args['path'] : undefined;
+        if (path !== undefined) {
+          const reason = forbiddenPathReason(path);
+          if (reason) {
+            return errorResult(`${path}: ${reason}`);
+          }
+        }
         return textResult(await transactor.recentChanges(limit, path));
       }
       if (name === 'append_to_section') {

@@ -6,11 +6,17 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
+// GIT_CONFIG_GLOBAL/SYSTEM point at /dev/null so fixture git never inherits the host's
+// config — a global hook, alias, or signing setting must not change test behavior.
+const FIXTURE_GIT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+};
+
 export async function git(args: string[], cwd: string): Promise<string> {
-  const { stdout } = await exec('git', args, {
-    cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-  });
+  const { stdout } = await exec('git', args, { cwd, env: FIXTURE_GIT_ENV });
   return stdout.trim();
 }
 
@@ -57,6 +63,8 @@ export interface Fixture {
   collabWrite(path: string, content: string, message: string): Promise<string>;
   /** git log of the bare remote's main, newest first. */
   bareLog(format: string, limit?: number): Promise<string[]>;
+  /** SHA of the bare remote's main — snapshot before a rejection, compare after. */
+  bareHead(): Promise<string>;
   /**
    * Exact bytes of a file on the remote's main. Deliberately avoids the trimming git()
    * helper, because byte-identity assertions must see trailing-newline corruption.
@@ -110,10 +118,13 @@ export async function createFixture(): Promise<Fixture> {
       const out = await git(['log', `--format=${format}`, `-n`, String(limit), 'main'], bareDir);
       return out === '' ? [] : out.split('\n');
     },
+    bareHead() {
+      return git(['rev-parse', 'main'], bareDir);
+    },
     async remoteFile(path) {
       const { stdout } = await exec('git', ['cat-file', 'blob', `main:${path}`], {
         cwd: bareDir,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: FIXTURE_GIT_ENV,
       });
       return stdout;
     },

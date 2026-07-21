@@ -79,6 +79,7 @@ describe('append_to_section', () => {
   });
 
   it('refuses empty heading or text instead of writing a stray section', async () => {
+    const preRemote = await fx.bareHead();
     const emptyHeading = await callTool(srv.client, 'append_to_section', {
       path: ALPHA,
       heading: '',
@@ -93,6 +94,7 @@ describe('append_to_section', () => {
     });
     expect(emptyText.isError).toBe(true);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await fx.bareHead()).toBe(preRemote);
   });
 
   it('refuses a missing note instead of inventing one', async () => {

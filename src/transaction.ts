@@ -1,4 +1,4 @@
-import { open, unlink } from 'node:fs/promises';
+import { open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGit, type GitOptions } from './git.js';
 
@@ -105,7 +105,48 @@ export class Transactor {
   }
 
   private async releaseLock(): Promise<void> {
-    await unlink(this.lockPath).catch(() => {});
+    await unlink(this.lockPath).catch((err) => {
+      // A missing lockfile is fine (already released); anything else deserves a trace,
+      // because a lock that silently fails to release blocks every later write.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error(`failed to release the vault lock at ${this.lockPath}:`, err);
+      }
+    });
+  }
+
+  /**
+   * Remove a leftover lockfile only when its recorded holder is dead. A live pid means
+   * another server is actively writing this checkout (e.g. a rolling restart overlap) —
+   * ripping its lock out and resetting the tree would corrupt that transaction, so we
+   * refuse to start instead.
+   */
+  private async releaseStaleLock(): Promise<void> {
+    let contents: string;
+    try {
+      contents = await readFile(this.lockPath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+    // Our own pid counts as live too: a lockfile with this process's pid means another
+    // Transactor in this same process holds it (the lockfile, not the in-process mutex,
+    // is what separates two Transactors on one checkout).
+    const pid = Number(contents.match(/^pid (\d+)/)?.[1]);
+    if (pid && this.isProcessAlive(pid)) {
+      throw new LockError(
+        `the vault lock at ${this.lockPath} is held by live pid ${pid}; refusing to start`,
+      );
+    }
+    await this.releaseLock();
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async isDirty(): Promise<boolean> {
@@ -132,9 +173,8 @@ export class Transactor {
    */
   async reconcileAtStartup(): Promise<void> {
     // A crashed process can't release its lock, and the lock lives in .git/ where tree
-    // recovery never looks. Startup runs before serving, so any existing lockfile is
-    // orphaned. (Two live servers sharing one checkout is unsupported.)
-    await this.releaseLock();
+    // recovery never looks — but only a DEAD holder's lock is safe to clear.
+    await this.releaseStaleLock();
     await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
     this.lastFetchAt = Date.now();
     const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';

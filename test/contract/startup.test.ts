@@ -33,9 +33,9 @@ describe('startup reconciliation', () => {
 
   it('clears an orphaned lockfile so a crashed process cannot block writes forever', async () => {
     // A process that dies mid-transaction leaves its lockfile behind; the lock lives
-    // in .git/ so tree recovery never touches it. Startup must clear it, because a
-    // fresh start means any previous holder is dead.
-    await writeFile(join(fx.serverDir, '.git', 'obsidian-git-mcp.lock'), 'pid 99999\n');
+    // in .git/ so tree recovery never touches it. An unparseable holder counts as
+    // dead, so startup clears the lock.
+    await writeFile(join(fx.serverDir, '.git', 'obsidian-git-mcp.lock'), 'crashed mid-write\n');
     await writeFile(join(fx.serverDir, 'Junk.md'), 'crash debris\n');
 
     srv = await startServer(fx);
@@ -45,6 +45,18 @@ describe('startup reconciliation', () => {
       content: '# After\n',
     });
     expect(res.isError).toBeFalsy();
+  });
+
+  it('refuses to start when the lock is held by a live process', async () => {
+    // A live holder means another server is writing this checkout (rolling-restart
+    // overlap); ripping out its lock and resetting the tree would corrupt that
+    // transaction, so startup must fail instead. Our own pid is guaranteed alive.
+    await writeFile(
+      join(fx.serverDir, '.git', 'obsidian-git-mcp.lock'),
+      `pid ${process.pid} at test\n`,
+    );
+
+    await expect(startServer(fx)).rejects.toThrow(/lock.*live pid/i);
   });
 
   it('discards an unpushed local commit', async () => {

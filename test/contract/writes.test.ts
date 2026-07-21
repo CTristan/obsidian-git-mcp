@@ -47,6 +47,9 @@ describe('writes', () => {
     // The checkout ends the transaction clean and on the pushed commit.
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(sha);
+
+    // And the remote holds the exact bytes that were written.
+    expect(await fx.remoteFile('Inbox/New.md')).toBe('# New\n\nHello from the contract suite.\n');
   });
 
   it('patch_note changes only the intended bytes', async () => {

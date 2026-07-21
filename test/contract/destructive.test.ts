@@ -27,7 +27,15 @@ describe('destructive tools', () => {
     const res = await callTool(srv.client, 'delete_note', { path: 'Inbox/Beta.md' });
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('disabled');
-    // The note is still on the remote.
+
+    const move = await callTool(srv.client, 'move_note', {
+      oldPath: 'Inbox/Beta.md',
+      newPath: 'Archive/Beta.md',
+    });
+    expect(move.isError).toBe(true);
+    expect(textOf(move).toLowerCase()).toContain('disabled');
+
+    // The note is still on the remote, untouched.
     expect(await git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).toContain('squirrels');
   });
 

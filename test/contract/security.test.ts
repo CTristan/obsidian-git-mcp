@@ -27,42 +27,50 @@ describe('security', () => {
   });
 
   it('path traversal is refused for writes', async () => {
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'write_note', {
       path: '../evil.md',
       content: 'escape attempt\n',
     });
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.root, 'evil.md'))).toBe(false);
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
   });
 
-  it('absolute paths are refused', async () => {
-    const res = await callTool(srv.client, 'read_note', { path: '/etc/hosts' });
-    expect(res.isError).toBe(true);
+  it('absolute paths are refused for reads and writes', async () => {
+    const read = await callTool(srv.client, 'read_note', { path: '/etc/hosts' });
+    expect(read.isError).toBe(true);
+
+    const preRemote = await fx.bareHead();
+    const write = await callTool(srv.client, 'write_note', {
+      path: '/tmp/evil.md',
+      content: 'escape attempt\n',
+    });
+    expect(write.isError).toBe(true);
+    expect(await fx.bareHead()).toBe(preRemote);
   });
 
   it('.obsidian writes are refused at the tool layer', async () => {
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'write_note', {
       path: '.obsidian/app.json',
       content: '{"pwned":true}',
     });
     expect(res.isError).toBe(true);
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
   });
 
   it('.obsidian is refused by wrapper-added tools too', async () => {
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'append_to_section', {
       path: '.obsidian/note.md',
       heading: 'X',
       text: 'y',
     });
     expect(res.isError).toBe(true);
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
   });
 

@@ -28,7 +28,7 @@ describe('transaction safety', () => {
   it('a write containing conflict markers is rejected and rolled back', async () => {
     srv = await startServer(fx);
     const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Bad.md',
@@ -37,7 +37,7 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('conflict marker');
 
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
@@ -46,7 +46,7 @@ describe('transaction safety', () => {
   it('broken frontmatter YAML never reaches the remote', async () => {
     srv = await startServer(fx);
     const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Broken.md',
@@ -56,7 +56,7 @@ describe('transaction safety', () => {
     // is only that nothing lands.
     expect(res.isError).toBe(true);
 
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
@@ -127,7 +127,7 @@ describe('transaction safety', () => {
       },
     });
     const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Doomed.md',
@@ -135,7 +135,7 @@ describe('transaction safety', () => {
     });
     expect(res.isError).toBe(true);
 
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
@@ -196,7 +196,7 @@ describe('transaction safety', () => {
 
   it('a dirty checkout refuses writes until reconciled', async () => {
     srv = await startServer(fx);
-    const [preRemote] = await fx.bareLog('%H', 1);
+    const preRemote = await fx.bareHead();
     await writeFile(join(fx.serverDir, 'Stray.md'), 'stray uncommitted debris\n');
 
     const res = await callTool(srv.client, 'write_note', {
@@ -206,7 +206,16 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('dirty');
 
-    const [postRemote] = await fx.bareLog('%H', 1);
+    const postRemote = await fx.bareHead();
     expect(postRemote).toBe(preRemote);
+
+    // The recovery half: a restart reconciles the checkout and writes work again.
+    await srv.close();
+    srv = await startServer(fx);
+    const retry = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/New.md',
+      content: '# New\n',
+    });
+    expect(retry.isError).toBeFalsy();
   });
 });

@@ -8,11 +8,16 @@ const RESTRICTED_SEGMENTS = new Set(['.obsidian', '.git']);
 /** Returns a human-readable refusal reason, or undefined when the path is acceptable. */
 export function forbiddenPathReason(path: string): string | undefined {
   if (path === '') return 'empty path';
-  if (isAbsolute(path)) return 'absolute paths are not allowed';
+  const slashed = path.replaceAll('\\', '/');
+  // isAbsolute() on posix misses Windows forms: drive-relative ("C:note.md"),
+  // drive-absolute ("C:/x"), and root-relative ("\x" — already folded to "/x").
+  if (isAbsolute(path) || /^[A-Za-z]:/.test(slashed) || slashed.startsWith('/')) {
+    return 'absolute paths are not allowed';
+  }
   // Check the raw segments before normalize(), because normalize collapses interior
   // '..' ("notes/../draft.md" -> "draft.md") and the contract is that '..' never
   // appears in an accepted path at all.
-  if (path.replaceAll('\\', '/').split('/').includes('..')) {
+  if (slashed.split('/').includes('..')) {
     return 'path traversal is not allowed';
   }
   const segments = normalize(path).replaceAll('\\', '/').split('/');
