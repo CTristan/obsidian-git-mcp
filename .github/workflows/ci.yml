@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   test:
+    # The branch ruleset requires a status check with context "CI", so the job name must stay CI.
+    name: CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
