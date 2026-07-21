@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -137,6 +137,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
 
   // Fail fast when the path isn't a git checkout — everything downstream assumes one.
   await runGit(['rev-parse', '--git-dir'], vaultPath);
+  // Canonical vault root for symlink-containment checks (the configured path itself may
+  // sit behind a symlink, e.g. /tmp on macOS).
+  const realVaultPath = await realpath(vaultPath);
 
   const transactor = new Transactor({
     vaultPath,
@@ -206,13 +209,22 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       return errorResult(`${path}: path escapes the vault`);
     }
     const sha = await transactor.transact(`append_to_section: ${path} (${heading})`, async () => {
-      let content: string;
+      // Symlink containment runs INSIDE the transaction, after fetch/fast-forward, so
+      // it also covers a symlink that only just arrived from the remote. Unlike the
+      // MCPVault-forwarded tools (which realpath-guard upstream), this tool touches the
+      // filesystem itself — and a write through an out-of-vault symlink would be
+      // invisible to git status, so neither commit nor rollback would ever cover it.
+      let real: string;
       try {
-        content = await readFile(absPath, 'utf8');
+        real = await realpath(absPath);
       } catch {
         throw new InnerToolError(`${path}: note not found`);
       }
-      await writeFile(absPath, appendToSection(content, heading, text));
+      if (!real.startsWith(realVaultPath + sep)) {
+        throw new InnerToolError(`${path}: refusing to follow a symlink outside the vault`);
+      }
+      const content = await readFile(real, 'utf8');
+      await writeFile(real, appendToSection(content, heading, text));
     });
     return textResult(`Appended to "${heading}" in ${path}`, { commitSha: sha });
   };
@@ -255,8 +267,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return await forwardWrite(name, args);
       }
       if (READ_TOOLS.has(name)) {
-        const headSha = await transactor.freshenForRead();
-        const result = await callInner(name, args);
+        const { headSha, result } = await transactor.readTransaction(() => callInner(name, args));
         return { ...result, _meta: { ...(result._meta ?? {}), headSha } };
       }
       return errorResult(`unknown tool: ${name}`);

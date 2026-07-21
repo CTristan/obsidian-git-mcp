@@ -131,8 +131,12 @@ export class Transactor {
     }
   }
 
-  /** Fetch + fast-forward when stale, then return HEAD. Reads ride the same mutex. */
-  freshenForRead(): Promise<string> {
+  /**
+   * Run a read inside the mutex — the freshen step AND the read itself — so a read can
+   * never observe another transaction's mid-mutation or mid-rollback tree state. The
+   * returned headSha is captured in the same critical section the read ran in.
+   */
+  readTransaction<T>(read: () => Promise<T>): Promise<{ headSha: string; result: T }> {
     return this.enqueue(async () => {
       if (Date.now() - this.lastFetchAt >= this.cfg.readFreshnessMs) {
         await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
@@ -143,7 +147,9 @@ export class Transactor {
           await this.git(['merge', '--ff-only', this.target()]).catch(() => {});
         }
       }
-      return this.git(['rev-parse', 'HEAD']);
+      const headSha = await this.git(['rev-parse', 'HEAD']);
+      const result = await read();
+      return { headSha, result };
     });
   }
 
@@ -188,6 +194,24 @@ export class Transactor {
             await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`]);
             return await this.git(['rev-parse', 'HEAD']);
           } catch (err) {
+            // A failed push may still have landed: the remote can update the ref and
+            // the ACK get lost afterwards, so check reachability before treating this
+            // as a failure — otherwise we'd roll back and report "nothing was changed"
+            // for a write that IS on the remote, and the caller's retry would duplicate it.
+            await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+            this.lastFetchAt = Date.now();
+            const landed = await this.git([
+              'merge-base',
+              '--is-ancestor',
+              'HEAD',
+              this.target(),
+            ]).then(
+              () => true,
+              () => false,
+            );
+            if (landed) {
+              return await this.git(['rev-parse', 'HEAD']);
+            }
             if (attempt >= this.cfg.maxPushRetries) {
               throw new ConflictError(
                 `push failed after ${attempt + 1} attempts; nothing was changed: ${(err as Error).message}`,
@@ -195,7 +219,6 @@ export class Transactor {
             }
             // The remote advanced under us. Rebasing our single commit is safe when it
             // applies cleanly; an actual conflict aborts and rolls the transaction back.
-            await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
             try {
               await this.git(['-c', 'commit.gpgsign=false', 'rebase', this.target()], {
                 env: this.commitEnv(),

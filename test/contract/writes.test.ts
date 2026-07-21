@@ -1,3 +1,4 @@
+import matter from 'gray-matter';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, SEED_NOTES, type Fixture } from '../fixture.js';
 import {
@@ -74,7 +75,8 @@ describe('writes', () => {
     const remote = await fx.remoteFile('Projects/Alpha.md');
     const seedBody = SEED_NOTES['Projects/Alpha.md']!.split('---\n')[2]!;
     expect(remote.endsWith(seedBody)).toBe(true);
-    expect(remote).toContain('status: done');
-    expect(remote).not.toContain('status: active');
+    // Sibling keys survive the merge semantically — MCPVault normalizes flow-style
+    // whitespace ([project] -> [ project ]), so assert the parsed data, not the bytes.
+    expect(matter(remote).data).toEqual({ tags: ['project'], status: 'done' });
   });
 });

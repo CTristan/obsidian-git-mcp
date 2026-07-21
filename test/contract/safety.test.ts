@@ -2,7 +2,14 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
-import { callTool, commitShaOf, startServer, textOf, type TestServer } from '../helpers.js';
+import {
+  callTool,
+  commitShaOf,
+  headShaOf,
+  startServer,
+  textOf,
+  type TestServer,
+} from '../helpers.js';
 
 describe('transaction safety', () => {
   let fx: Fixture;
@@ -132,6 +139,59 @@ describe('transaction safety', () => {
     expect(postRemote).toBe(preRemote);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
+  it('a push whose ACK is lost but which landed is treated as success', async () => {
+    // Simulates the lost-ACK case: the commit reaches the remote, the remote advances
+    // further, and our push attempt then fails — with zero retries left. The transaction
+    // must recognize its commit already landed instead of rolling back and reporting
+    // "nothing was changed" for a write that is on the remote.
+    let fired = false;
+    srv = await startServer(fx, {
+      maxPushRetries: 0,
+      testHooks: {
+        beforePush: async () => {
+          if (fired) return;
+          fired = true;
+          await git(['push', 'origin', 'HEAD:main'], fx.serverDir);
+          await fx.collabWrite('Inbox/Other.md', 'other\n', 'collab: on top');
+        },
+      },
+    });
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/Landed.md',
+      content: '# Landed\n',
+    });
+    expect(res.isError).toBeFalsy();
+    const sha = commitShaOf(res);
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+
+    const log = await fx.bareLog('%H %s', 5);
+    expect(log.some((l) => l.startsWith(sha))).toBe(true);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
+  it('a read raced with a write never returns content newer than its stamped SHA', async () => {
+    srv = await startServer(fx);
+    let prev = 'Alpha is in flight.';
+    for (let i = 0; i < 6; i++) {
+      const marker = `revision-${i}.`;
+      const [w, r] = await Promise.all([
+        callTool(srv.client, 'patch_note', {
+          path: 'Projects/Alpha.md',
+          oldString: prev,
+          newString: marker,
+        }),
+        callTool(srv.client, 'read_note', { path: 'Projects/Alpha.md' }),
+      ]);
+      expect(w.isError).toBeFalsy();
+      const sha = headShaOf(r);
+      const atSha = await git(['show', `${sha}:Projects/Alpha.md`], fx.serverDir);
+      // Whatever revision the read saw must be exactly the one at its stamped SHA.
+      expect(textOf(r).includes(marker)).toBe(atSha.includes(marker));
+      prev = marker;
+    }
   });
 
   it('a dirty checkout refuses writes until reconciled', async () => {

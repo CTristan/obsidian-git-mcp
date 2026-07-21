@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createFixture, type Fixture } from '../fixture.js';
+import { createFixture, git, type Fixture } from '../fixture.js';
 import { callTool, startServer, textOf, type TestServer } from '../helpers.js';
 
 describe('security', () => {
@@ -64,6 +64,27 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     const [postRemote] = await fx.bareLog('%H', 1);
     expect(postRemote).toBe(preRemote);
+  });
+
+  it('append_to_section refuses a symlink that escapes the vault', async () => {
+    // A committed symlink is legitimate vault content, but following it would write
+    // outside the checkout — invisibly to git status, so no commit and no rollback
+    // would ever cover the damage.
+    const target = join(fx.root, 'outside-target.md');
+    await writeFile(target, '# Outside\n\n## X\n\noriginal\n');
+    await symlink('../outside-target.md', join(fx.collabDir, 'Linked.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add symlink'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    const res = await callTool(srv.client, 'append_to_section', {
+      path: 'Linked.md',
+      heading: 'X',
+      text: 'injected',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(target, 'utf8')).not.toContain('injected');
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });
 
   it('list_directory omits .obsidian', async () => {
