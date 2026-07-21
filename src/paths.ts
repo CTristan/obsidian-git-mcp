@@ -9,6 +9,12 @@ const RESTRICTED_SEGMENTS = new Set(['.obsidian', '.git']);
 export function forbiddenPathReason(path: string): string | undefined {
   if (path === '') return 'empty path';
   if (isAbsolute(path)) return 'absolute paths are not allowed';
+  // Check the raw segments before normalize(), because normalize collapses interior
+  // '..' ("notes/../draft.md" -> "draft.md") and the contract is that '..' never
+  // appears in an accepted path at all.
+  if (path.replaceAll('\\', '/').split('/').includes('..')) {
+    return 'path traversal is not allowed';
+  }
   const segments = normalize(path).replaceAll('\\', '/').split('/');
   if (segments.includes('..')) return 'path traversal is not allowed';
   for (const segment of segments) {

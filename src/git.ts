@@ -28,7 +28,8 @@ export async function runGit(args: string[], cwd: string, options: GitOptions = 
   try {
     const { stdout } = await exec('git', args, {
       cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...options.env },
+      // GIT_TERMINAL_PROMPT last so no caller can re-enable interactive prompts.
+      env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: '0' },
       timeout: 30_000,
       maxBuffer: 16 * 1024 * 1024,
     });

@@ -1,4 +1,6 @@
-const HEADING = /^(#{1,6})\s+(.+?)\s*$/;
+// The optional trailing group strips a closed-ATX marker ("## Log ##"), which needs
+// whitespace before it — a bare trailing # ("## C#") is part of the name.
+const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 
 /**
  * Append text at the end of the named section. The section runs from its heading to the

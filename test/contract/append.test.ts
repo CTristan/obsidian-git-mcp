@@ -78,6 +78,23 @@ describe('append_to_section', () => {
     );
   });
 
+  it('refuses empty heading or text instead of writing a stray section', async () => {
+    const emptyHeading = await callTool(srv.client, 'append_to_section', {
+      path: ALPHA,
+      heading: '',
+      text: 'x',
+    });
+    expect(emptyHeading.isError).toBe(true);
+
+    const emptyText = await callTool(srv.client, 'append_to_section', {
+      path: ALPHA,
+      heading: 'Log',
+      text: '',
+    });
+    expect(emptyText.isError).toBe(true);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
   it('refuses a missing note instead of inventing one', async () => {
     const res = await callTool(srv.client, 'append_to_section', {
       path: 'Nope/Missing.md',

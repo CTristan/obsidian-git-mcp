@@ -80,10 +80,9 @@ export class Transactor {
   }
 
   private async acquireLock(): Promise<void> {
+    let handle;
     try {
-      const handle = await open(this.lockPath, 'wx');
-      await handle.writeFile(`pid ${process.pid} at ${new Date().toISOString()}\n`);
-      await handle.close();
+      handle = await open(this.lockPath, 'wx');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new LockError(
@@ -93,6 +92,16 @@ export class Transactor {
       }
       throw err;
     }
+    // The lockfile already exists on disk here, so a failure writing or closing must
+    // remove it — otherwise the orphan blocks every write until the next restart.
+    try {
+      await handle.writeFile(`pid ${process.pid} at ${new Date().toISOString()}\n`);
+      await handle.close();
+    } catch (err) {
+      await handle.close().catch(() => {});
+      await unlink(this.lockPath).catch(() => {});
+      throw err;
+    }
   }
 
   private async releaseLock(): Promise<void> {
@@ -100,13 +109,16 @@ export class Transactor {
   }
 
   private async isDirty(): Promise<boolean> {
-    return (await this.git(['status', '--porcelain'])) !== '';
+    // --no-optional-locks: status() runs outside the mutex, and a plain `git status`
+    // opportunistically rewrites .git/index — which can collide with a concurrent
+    // transaction's index.lock and spuriously fail one side.
+    return (await this.git(['--no-optional-locks', 'status', '--porcelain'])) !== '';
   }
 
   private async changedPaths(): Promise<string[]> {
     // -z gives NUL-separated, unquoted paths. Unstaged changes never show as renames,
     // so every entry is a bare "XY path" record.
-    const out = await this.git(['status', '--porcelain=v1', '-z']);
+    const out = await this.git(['--no-optional-locks', 'status', '--porcelain=v1', '-z']);
     return out
       .split('\0')
       .filter((entry) => entry.length > 3)

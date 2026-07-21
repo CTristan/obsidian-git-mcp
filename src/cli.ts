@@ -18,19 +18,25 @@ const slug =
   collaborator.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/^-|-$/g, '') ||
   'collaborator';
 
-const server = await createVaultServer({
-  vaultPath,
-  collaborator: {
-    name: collaborator,
-    email: process.env['OGM_COLLABORATOR_EMAIL'] ?? `${slug}@collaborators.obsidian-git-mcp.local`,
-  },
-  service: {
-    name: process.env['OGM_SERVICE_NAME'] ?? 'obsidian-git-mcp',
-    email: process.env['OGM_SERVICE_EMAIL'] ?? 'service@obsidian-git-mcp.local',
-  },
-  branch: process.env['OGM_BRANCH'] ?? 'main',
-  remote: process.env['OGM_REMOTE'] ?? 'origin',
-  allowDestructive: process.env['OGM_ALLOW_DESTRUCTIVE'] === '1',
-});
-
-await server.connect(new StdioServerTransport());
+try {
+  const server = await createVaultServer({
+    vaultPath,
+    collaborator: {
+      name: collaborator,
+      email:
+        process.env['OGM_COLLABORATOR_EMAIL'] ?? `${slug}@collaborators.obsidian-git-mcp.local`,
+    },
+    service: {
+      name: process.env['OGM_SERVICE_NAME'] ?? 'obsidian-git-mcp',
+      email: process.env['OGM_SERVICE_EMAIL'] ?? 'service@obsidian-git-mcp.local',
+    },
+    branch: process.env['OGM_BRANCH'] ?? 'main',
+    remote: process.env['OGM_REMOTE'] ?? 'origin',
+    allowDestructive: process.env['OGM_ALLOW_DESTRUCTIVE'] === '1',
+  });
+  await server.connect(new StdioServerTransport());
+} catch (err) {
+  // Startup failures (bad vault path, unreachable remote) exit like argument errors do,
+  // instead of surfacing as a raw unhandled-rejection stack trace.
+  fail(`failed to start obsidian-git-mcp: ${err instanceof Error ? err.message : String(err)}`);
+}

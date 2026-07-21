@@ -200,6 +200,11 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     const path = typeof args['path'] === 'string' ? args['path'] : '';
     const heading = typeof args['heading'] === 'string' ? args['heading'] : '';
     const text = typeof args['text'] === 'string' ? args['text'] : '';
+    // The schema marks all three required, but clients that skip schema validation
+    // would otherwise write a stray "## " section or an empty append commit.
+    if (!path || !heading.trim() || !text) {
+      return errorResult('path, heading, and text are all required and must be non-empty');
+    }
     const reason = forbiddenPathReason(path);
     if (reason) {
       return errorResult(`${path}: ${reason}`);
@@ -280,7 +285,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       }
       return errorResult(`unknown tool: ${name}`);
     } catch (err) {
-      return errorResult((err as Error).message);
+      return errorResult(err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -289,9 +294,13 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       await outer.connect(transport);
     },
     async close(): Promise<void> {
-      await innerClient.close();
-      await inner.close();
-      await outer.close();
+      // Close everything even when one close rejects, then surface the first failure —
+      // otherwise an early rejection leaks the remaining server/transport.
+      const results = await Promise.allSettled([innerClient.close(), inner.close(), outer.close()]);
+      const failed = results.find((r) => r.status === 'rejected');
+      if (failed) {
+        throw (failed as PromiseRejectedResult).reason;
+      }
     },
   };
 }
