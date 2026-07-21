@@ -8,6 +8,10 @@ describe('forbiddenPathReason', () => {
     // contract is that '..' never appears in an accepted path.
     expect(forbiddenPathReason('notes/../draft.md')).toBeDefined();
     expect(forbiddenPathReason('/etc/hosts')).toBeDefined();
+    // Windows drive forms — absolute, backslash, and drive-relative alike.
+    expect(forbiddenPathReason('C:/outside.md')).toBeDefined();
+    expect(forbiddenPathReason('C:\\outside.md')).toBeDefined();
+    expect(forbiddenPathReason('C:relative.md')).toBeDefined();
     expect(forbiddenPathReason('.git/config')).toBeDefined();
     expect(forbiddenPathReason('.obsidian/app.json')).toBeDefined();
     expect(forbiddenPathReason('nested/.obsidian/app.json')).toBeDefined();

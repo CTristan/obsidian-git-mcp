@@ -54,6 +54,22 @@ describe('wrapper-added tools', () => {
     }
   });
 
+  it('the tools no other test exercises are callable with valid arguments', async () => {
+    // The classification pin above checks names; this checks the listed tools the rest
+    // of the suite never invokes actually work when called.
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ['get_frontmatter', { path: 'Projects/Alpha.md' }],
+      ['get_notes_info', { paths: ['Projects/Alpha.md'] }],
+      ['get_vault_stats', {}],
+      ['list_all_tags', {}],
+      ['manage_tags', { path: 'Projects/Alpha.md', operation: 'add', tags: ['spike'] }],
+    ];
+    for (const [name, args] of calls) {
+      const res = await callTool(srv.client, name, args);
+      expect(res.isError, `${name} failed: ${textOf(res)}`).toBeFalsy();
+    }
+  });
+
   it('list_recent_changes returns newest-first git history', async () => {
     await callTool(srv.client, 'write_note', { path: 'Inbox/Newest.md', content: '# Newest\n' });
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 10 });

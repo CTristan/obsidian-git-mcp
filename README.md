@@ -26,14 +26,14 @@ cd obsidian-git-mcp
 pnpm install && pnpm build
 ```
 
-The entry point is `dist/cli.js`, so `node /path/to/obsidian-git-mcp/dist/cli.js` works anywhere the examples below say `obsidian-git-mcp`.
+The build does not put `obsidian-git-mcp` on `PATH`. Run `pnpm link --global` from the repo to get the bare command, or use `node /path/to/obsidian-git-mcp/dist/cli.js` directly — the examples below show the direct form because it works without any extra step.
 
 ## Running it
 
 Point the server at a normal git clone of your vault (never your live Obsidian directory — the checkout is the server's workspace and it will hard-reset it to the remote when recovering from a crash):
 
 ```sh
-obsidian-git-mcp /path/to/vault-checkout
+node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
 
 The server speaks MCP over stdio. Configuration comes from environment variables:
@@ -51,7 +51,7 @@ The server speaks MCP over stdio. Configuration comes from environment variables
 Example Claude Code registration:
 
 ```sh
-claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- obsidian-git-mcp /path/to/vault-checkout
+claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
 
 ## Status: the spike's verdict

@@ -48,6 +48,12 @@ describe('security', () => {
       content: 'escape attempt\n',
     });
     expect(write.isError).toBe(true);
+
+    const driveForm = await callTool(srv.client, 'write_note', {
+      path: 'C:\\evil.md',
+      content: 'escape attempt\n',
+    });
+    expect(driveForm.isError).toBe(true);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 
