@@ -118,6 +118,57 @@ describe('transaction safety', () => {
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
   });
 
+  it('a clean rebase that splices in invalid content is refused, not pushed', async () => {
+    // The collaborator edits only the frontmatter (breaking its YAML) while our write
+    // edits only the body — non-overlapping regions, so the rebase applies cleanly with
+    // no textual conflict. That "clean" merge still produces a file that was never
+    // validated, since the collaborator's write bypasses this server entirely.
+    const collabVersion = [
+      '---',
+      'tags: [project',
+      'status: active',
+      '---',
+      '',
+      '# Alpha',
+      '',
+      '## Status',
+      '',
+      'Alpha is in flight.',
+      '',
+      '## Decisions',
+      '',
+      '- Ship early.',
+      '',
+    ].join('\n');
+    let fired = false;
+    srv = await startServer(fx, {
+      testHooks: {
+        beforePush: async () => {
+          if (!fired) {
+            fired = true;
+            await fx.collabWrite('Projects/Alpha.md', collabVersion, 'collab: break frontmatter');
+          }
+        },
+      },
+    });
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+
+    const res = await callTool(srv.client, 'patch_note', {
+      path: 'Projects/Alpha.md',
+      oldString: 'Alpha is in flight.',
+      newString: 'Alpha has shipped.',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('conflict');
+
+    // The collaborator's (invalid) version is what actually landed — the rebase-merged
+    // content, which spliced our valid body edit onto their broken frontmatter, must
+    // never reach the remote unvalidated.
+    expect(await fx.remoteFile('Projects/Alpha.md')).toBe(collabVersion);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
   it('a mid-transaction failure restores the checkout exactly', async () => {
     srv = await startServer(fx, {
       testHooks: {

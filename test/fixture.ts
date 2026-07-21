@@ -59,6 +59,11 @@ export interface Fixture {
   serverDir: string;
   /** An independent clone simulating a concurrent human/agent editor. */
   collabDir: string;
+  /**
+   * A unique temp dir outside the checkout, for absolute-path-escape tests. Its own
+   * mkdtemp (not a fixed path like /tmp/evil.md) so concurrent test runs can't collide.
+   */
+  outsideDir: string;
   /** Commit + push a file from the collaborator clone; returns the new SHA. */
   collabWrite(path: string, content: string, message: string): Promise<string>;
   /** git log of the bare remote's main, newest first. */
@@ -79,6 +84,7 @@ export async function createFixture(): Promise<Fixture> {
   const seedDir = join(root, 'seed');
   const serverDir = join(root, 'server');
   const collabDir = join(root, 'collab');
+  const outsideDir = await mkdtemp(join(tmpdir(), 'ogm-outside-'));
 
   await mkdir(bareDir);
   await git(['init', '--bare', '-b', 'main', '.'], bareDir);
@@ -105,6 +111,7 @@ export async function createFixture(): Promise<Fixture> {
     bareDir,
     serverDir,
     collabDir,
+    outsideDir,
     async collabWrite(path, content, message) {
       await git(['pull', '--rebase', 'origin', 'main'], collabDir);
       await mkdir(join(collabDir, dirname(path)), { recursive: true });
@@ -115,7 +122,7 @@ export async function createFixture(): Promise<Fixture> {
       return git(['rev-parse', 'HEAD'], collabDir);
     },
     async bareLog(format, limit = 20) {
-      const out = await git(['log', `--format=${format}`, `-n`, String(limit), 'main'], bareDir);
+      const out = await git(['log', `--format=${format}`, '-n', String(limit), 'main'], bareDir);
       return out === '' ? [] : out.split('\n');
     },
     bareHead() {
@@ -130,6 +137,7 @@ export async function createFixture(): Promise<Fixture> {
     },
     async cleanup() {
       await rm(root, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
     },
   };
 }

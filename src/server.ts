@@ -1,5 +1,5 @@
-import { readFile, realpath, writeFile } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -12,7 +12,6 @@ import {
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { appendToSection } from './append.js';
-import { runGit } from './git.js';
 import { forbiddenPathReason } from './paths.js';
 import { Transactor, type Identity } from './transaction.js';
 import { validateNoteContent, ValidationError } from './validate.js';
@@ -48,7 +47,7 @@ const WRAPPER_TOOLS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'number', description: 'Maximum commits to return (default 20)' },
+        limit: { type: 'integer', description: 'Maximum commits to return (default 20)' },
         path: { type: 'string', description: 'Restrict history to this vault path' },
       },
     },
@@ -112,17 +111,64 @@ function textOf(result: CallToolResult): string {
     .join('\n');
 }
 
+/**
+ * Extracts a string tool arg, falling back when it's absent or the wrong type. Omit
+ * `fallback` for the default `''`; pass `undefined` explicitly (a real third argument,
+ * not a default-parameter substitution) when the caller needs to distinguish "arg
+ * absent" from "arg present but empty" downstream.
+ */
+function stringArg(args: Record<string, unknown>, key: string): string;
+function stringArg(args: Record<string, unknown>, key: string, fallback: string): string;
+function stringArg(args: Record<string, unknown>, key: string, fallback: undefined): string | undefined;
+function stringArg(
+  args: Record<string, unknown>,
+  key: string,
+  ...fallback: [] | [string | undefined]
+): string | undefined {
+  const value = args[key];
+  if (typeof value === 'string') return value;
+  return fallback.length > 0 ? fallback[0] : '';
+}
+
 function commitMessageFor(tool: string, args: Record<string, unknown>): string {
-  const str = (key: string): string => (typeof args[key] === 'string' ? (args[key] as string) : '');
   if (tool === 'move_note' || tool === 'move_file') {
-    return `${tool}: ${str('oldPath')} -> ${str('newPath')}`;
+    return `${tool}: ${stringArg(args, 'oldPath')} -> ${stringArg(args, 'newPath')}`;
   }
-  return `${tool}: ${str('path') || '(multiple)'}`;
+  return `${tool}: ${stringArg(args, 'path') || '(multiple)'}`;
 }
 
 /** Raised when the inner MCPVault tool itself rejected the call mid-transaction. */
 class InnerToolError extends Error {
   override name = 'InnerToolError';
+}
+
+// Path-like arg keys across the READ_TOOLS set: a single note path (read_note,
+// get_frontmatter, list_directory) or a batch of them (read_multiple_notes,
+// get_notes_info). search_notes/get_vault_stats/list_all_tags take none of these.
+const READ_PATH_ARG_KEYS = ['path', 'paths'];
+
+/**
+ * Preflights read-tool path args against forbiddenPathReason before forwarding to
+ * MCPVault — mirroring forwardWrite's preflight, because MCPVault's own PathFilter is
+ * not a boundary this wrapper controls. An empty string is list_directory's documented
+ * way of asking for the vault root, not an escape attempt, so it's exempt.
+ */
+function forbiddenReadArgReason(args: Record<string, unknown>): string | undefined {
+  for (const key of READ_PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value === 'string' && value !== '') {
+      const reason = forbiddenPathReason(value);
+      if (reason) return `${value}: ${reason}`;
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string' && item !== '') {
+          const reason = forbiddenPathReason(item);
+          if (reason) return `${item}: ${reason}`;
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 export async function createVaultServer(config: VaultServerConfig): Promise<VaultServer> {
@@ -136,7 +182,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   };
 
   // Fail fast when the path isn't a git checkout — everything downstream assumes one.
-  await runGit(['rev-parse', '--git-dir'], vaultPath);
+  await Transactor.assertCheckout(vaultPath);
   // Canonical vault root for symlink-containment checks (the configured path itself may
   // sit behind a symlink, e.g. /tmp on macOS).
   const realVaultPath = await realpath(vaultPath);
@@ -168,7 +214,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   });
   await transactor.reconcileAtStartup();
 
-  // Option (a) protocol proxy: MCPVault runs in-process behind an InMemoryTransport
+  // Protocol proxy: MCPVault runs in-process behind an InMemoryTransport
   // pair, so the wrapper treats it as a black box and upgrades stay cheap.
   const inner = createMcpVaultServer(vaultPath, { name: 'mcpvault-inner', version: VERSION });
   const [innerClientTransport, innerServerTransport] = InMemoryTransport.createLinkedPair();
@@ -203,14 +249,41 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (result.isError) {
         throw new InnerToolError(textOf(result));
       }
+      // MCPVault's own filter only judges the literal argument string, so a symlink
+      // whose name looks unremarkable (e.g. "Linked.md") can still resolve onto a
+      // restricted path once followed — and git status never reports .git/ at all,
+      // ignored or not, so the transaction layer's changedPaths() check can never
+      // catch it either. Re-check where each path argument actually landed on disk,
+      // independent of both, and undo the write if it escaped or landed somewhere
+      // restricted.
+      for (const key of ['path', 'oldPath', 'newPath']) {
+        const value = args[key];
+        if (typeof value !== 'string') continue;
+        let real: string;
+        try {
+          real = await realpath(resolve(vaultPath, value));
+        } catch {
+          continue; // nothing landed there (e.g. oldPath after a move)
+        }
+        const reason = real.startsWith(realVaultPath + sep)
+          ? forbiddenPathReason(relative(realVaultPath, real))
+          : 'refusing to follow a symlink outside the vault';
+        if (reason) {
+          await unlink(real).catch(() => {});
+          throw new InnerToolError(`${value}: ${reason}`);
+        }
+      }
     });
-    return { ...result!, _meta: { ...(result!._meta ?? {}), commitSha: sha } };
+    if (!result) {
+      throw new Error(`${name}: transact() resolved without running mutate`);
+    }
+    return { ...result, _meta: { ...(result._meta ?? {}), commitSha: sha } };
   };
 
   const appendTool = async (args: Record<string, unknown>): Promise<CallToolResult> => {
-    const path = typeof args['path'] === 'string' ? args['path'] : '';
-    const heading = typeof args['heading'] === 'string' ? args['heading'] : '';
-    const text = typeof args['text'] === 'string' ? args['text'] : '';
+    const path = stringArg(args, 'path');
+    const heading = stringArg(args, 'heading');
+    const text = stringArg(args, 'text');
     // The schema marks all three required, but clients that skip schema validation
     // would otherwise write a stray "## " section or an empty append commit.
     if (!path || !heading.trim() || !text) {
@@ -236,8 +309,11 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       } catch {
         throw new InnerToolError(`${path}: note not found`);
       }
-      if (!real.startsWith(realVaultPath + sep)) {
-        throw new InnerToolError(`${path}: refusing to follow a symlink outside the vault`);
+      const reason = real.startsWith(realVaultPath + sep)
+        ? forbiddenPathReason(relative(realVaultPath, real))
+        : 'refusing to follow a symlink outside the vault';
+      if (reason) {
+        throw new InnerToolError(`${path}: ${reason}`);
       }
       const content = await readFile(real, 'utf8');
       await writeFile(real, appendToSection(content, heading, text));
@@ -272,8 +348,8 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return textResult(JSON.stringify(await transactor.status(), null, 2));
       }
       if (name === 'list_recent_changes') {
-        const limit = Math.min(Math.max(Number(args['limit'] ?? 20) || 20, 1), 200);
-        const path = typeof args['path'] === 'string' ? args['path'] : undefined;
+        const limit = Math.trunc(Math.min(Math.max(Number(args['limit'] ?? 20) || 20, 1), 200));
+        const path = stringArg(args, 'path', undefined);
         if (path !== undefined) {
           const reason = forbiddenPathReason(path);
           if (reason) {
@@ -288,7 +364,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (DESTRUCTIVE_TOOLS.has(name)) {
         if (!allowDestructive) {
           return errorResult(
-            `${name} is disabled by default; start the server with destructive tools enabled to use it`,
+            `${name} is disabled by default; restart the server with OGM_ALLOW_DESTRUCTIVE=1 to enable it`,
           );
         }
         return await forwardWrite(name, args);
@@ -297,6 +373,10 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return await forwardWrite(name, args);
       }
       if (READ_TOOLS.has(name)) {
+        const reason = forbiddenReadArgReason(args);
+        if (reason) {
+          return errorResult(reason);
+        }
         const { headSha, result } = await transactor.readTransaction(() => callInner(name, args));
         return { ...result, _meta: { ...(result._meta ?? {}), headSha } };
       }

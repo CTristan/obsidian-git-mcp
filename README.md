@@ -10,7 +10,7 @@ An MCP server for git-backed Obsidian vaults. Every write an AI collaborator mak
 - Refuses conflicting concurrent edits instead of guessing a merge. A push race with a non-conflicting remote commit retries a bounded number of times; an actual conflict stops immediately.
 - Attributes each commit to the collaborator that made it, so `git log --author=ChatGPT` is the audit trail. The service itself stays the committer.
 - Adds the git-aware tools MCPVault doesn't have: `vault_status`, `list_recent_changes`, and `append_to_section`.
-- Ships destructive tools (`delete_note`, `move_note`) disabled by default, and denies `.obsidian/` writes and path traversal at both the path-filter and transaction layers.
+- Ships destructive tools (`delete_note`, `move_note`, `move_file`) disabled by default, and denies `.obsidian/` writes and path traversal at both the path-filter and transaction layers.
 
 ## Why create this?
 
@@ -46,7 +46,7 @@ The server speaks MCP over stdio. Configuration comes from environment variables
 | `OGM_SERVICE_EMAIL` | `service@obsidian-git-mcp.local` | Email recorded as the git committer |
 | `OGM_BRANCH` | `main` | Branch the transaction wrapper syncs and pushes |
 | `OGM_REMOTE` | `origin` | Remote the transaction wrapper fetches and pushes |
-| `OGM_ALLOW_DESTRUCTIVE` | unset | Set to `1` to expose `delete_note` and `move_note` |
+| `OGM_ALLOW_DESTRUCTIVE` | unset | Set to `1` to expose `delete_note`, `move_note`, and `move_file` |
 
 Example Claude Code registration:
 
@@ -56,7 +56,7 @@ claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian
 
 ## Status: the spike's verdict
 
-MCPVault stays. The contract suite (34 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
+MCPVault stays. The contract suite (47 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
 
 Two quirks worth knowing, neither disqualifying:
 

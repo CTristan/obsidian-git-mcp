@@ -37,6 +37,8 @@ export interface TransactorConfig {
   validateChangedFile: (relPath: string) => Promise<void>;
   /** Test seam: runs before every push attempt. */
   beforePush?: (() => Promise<void>) | undefined;
+  /** Test seam: runs after every git invocation resolves, before its result returns. */
+  onGitCall?: ((args: readonly string[]) => void | Promise<void>) | undefined;
 }
 
 /**
@@ -55,8 +57,19 @@ export class Transactor {
     this.lockPath = join(cfg.vaultPath, '.git', 'obsidian-git-mcp.lock');
   }
 
-  private git(args: string[], options?: GitOptions): Promise<string> {
-    return runGit(args, this.cfg.vaultPath, options);
+  private async git(args: string[], options?: GitOptions): Promise<string> {
+    const result = await runGit(args, this.cfg.vaultPath, options);
+    await this.cfg.onGitCall?.(args);
+    return result;
+  }
+
+  /**
+   * Fail fast when vaultPath isn't a git checkout — everything a Transactor does assumes
+   * one. Static because it must run before construction, but it keeps this the only seam
+   * that touches git, matching every other invocation's route through the private git().
+   */
+  static async assertCheckout(vaultPath: string): Promise<void> {
+    await runGit(['rev-parse', '--git-dir'], vaultPath);
   }
 
   private target(): string {
@@ -167,6 +180,36 @@ export class Transactor {
   }
 
   /**
+   * Gitignored paths currently present. Plain `git status` skips these entirely, so a
+   * vault that gitignores .obsidian/ (common, since Obsidian's own workspace/cache files
+   * are routinely excluded) would hide a restricted write from changedPaths() forever.
+   * Callers must diff this against a pre-mutation snapshot: a directory that's already
+   * ignored before the transaction started must not fail every later write too, since it
+   * would then never clear again.
+   */
+  private async ignoredPaths(): Promise<Set<string>> {
+    const out = await this.git([
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--ignored',
+    ]);
+    return new Set(
+      out
+        .split('\0')
+        .filter((entry) => entry.startsWith('!!'))
+        .map((entry) => entry.slice(3)),
+    );
+  }
+
+  /** Paths our current HEAD touches relative to `ref` — the committed analog of changedPaths(). */
+  private async changedPathsSince(ref: string): Promise<string[]> {
+    const out = await this.git(['diff', '--name-only', '-z', ref, 'HEAD']);
+    return out.split('\0').filter((entry) => entry.length > 0);
+  }
+
+  /**
    * Crash recovery, run once before serving. Uncommitted debris or an unpushed commit
    * means a transaction died before its push was acknowledged — safe to discard, because
    * the caller never received a SHA for it.
@@ -230,14 +273,19 @@ export class Transactor {
         this.lastFetchAt = Date.now();
         await this.git(['merge', '--ff-only', this.target()]);
         rollbackTo = await this.git(['rev-parse', 'HEAD']);
+        const ignoredBefore = await this.ignoredPaths();
 
         await mutate();
 
         const changed = await this.changedPaths();
-        if (changed.length === 0) {
+        const newlyIgnored = [...(await this.ignoredPaths())].filter(
+          (path) => !ignoredBefore.has(path),
+        );
+        const toValidate = [...changed, ...newlyIgnored];
+        if (toValidate.length === 0) {
           return rollbackTo;
         }
-        for (const relPath of changed) {
+        for (const relPath of toValidate) {
           await this.cfg.validateChangedFile(relPath);
         }
 
@@ -248,50 +296,7 @@ export class Transactor {
           env: this.commitEnv(),
         });
 
-        for (let attempt = 0; ; attempt++) {
-          await this.cfg.beforePush?.();
-          try {
-            await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`]);
-            return await this.git(['rev-parse', 'HEAD']);
-          } catch (err) {
-            // A failed push may still have landed: the remote can update the ref and
-            // the ACK get lost afterwards, so check reachability before treating this
-            // as a failure — otherwise we'd roll back and report "nothing was changed"
-            // for a write that IS on the remote, and the caller's retry would duplicate it.
-            await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
-            this.lastFetchAt = Date.now();
-            const landed = await this.git([
-              'merge-base',
-              '--is-ancestor',
-              'HEAD',
-              this.target(),
-            ]).then(
-              () => true,
-              () => false,
-            );
-            if (landed) {
-              return await this.git(['rev-parse', 'HEAD']);
-            }
-            if (attempt >= this.cfg.maxPushRetries) {
-              throw new ConflictError(
-                `push failed after ${attempt + 1} attempts; nothing was changed: ${(err as Error).message}`,
-              );
-            }
-            // The remote advanced under us. Rebasing our single commit is safe when it
-            // applies cleanly; an actual conflict aborts and rolls the transaction back.
-            try {
-              await this.git(['-c', 'commit.gpgsign=false', 'rebase', this.target()], {
-                env: this.commitEnv(),
-              });
-            } catch (rebaseErr) {
-              await this.git(['rebase', '--abort']).catch(() => {});
-              throw new ConflictError(
-                'a concurrent edit conflicts with this write; nothing was changed: ' +
-                  (rebaseErr as Error).message,
-              );
-            }
-          }
-        }
+        return await this.pushWithRetries();
       } catch (err) {
         if (rollbackTo !== undefined) {
           await this.git(['rebase', '--abort']).catch(() => {});
@@ -305,6 +310,73 @@ export class Transactor {
     });
   }
 
+  /**
+   * Push the just-committed HEAD, retrying through a bounded number of rebase-onto-remote
+   * attempts when the remote advances underneath us. Returns the pushed SHA; throws
+   * ConflictError once retries are exhausted or a concurrent edit doesn't reconcile.
+   */
+  private async pushWithRetries(): Promise<string> {
+    for (let attempt = 0; ; attempt++) {
+      await this.cfg.beforePush?.();
+      try {
+        await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`]);
+        return await this.git(['rev-parse', 'HEAD']);
+      } catch (err) {
+        // A failed push may still have landed: the remote can update the ref and
+        // the ACK get lost afterwards, so check reachability before treating this
+        // as a failure — otherwise we'd roll back and report "nothing was changed"
+        // for a write that IS on the remote, and the caller's retry would duplicate it.
+        await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+        this.lastFetchAt = Date.now();
+        const landed = await this.git([
+          'merge-base',
+          '--is-ancestor',
+          'HEAD',
+          this.target(),
+        ]).then(
+          () => true,
+          () => false,
+        );
+        if (landed) {
+          return await this.git(['rev-parse', 'HEAD']);
+        }
+        if (attempt >= this.cfg.maxPushRetries) {
+          throw new ConflictError(
+            `push failed after ${attempt + 1} attempts; nothing was changed: ${(err as Error).message}`,
+          );
+        }
+        // The remote advanced under us. Rebasing our single commit is safe when it
+        // applies cleanly; an actual conflict aborts and rolls the transaction back.
+        try {
+          await this.git(['-c', 'commit.gpgsign=false', 'rebase', this.target()], {
+            env: this.commitEnv(),
+          });
+        } catch (rebaseErr) {
+          await this.git(['rebase', '--abort']).catch(() => {});
+          throw new ConflictError(
+            'a concurrent edit conflicts with this write; nothing was changed: ' +
+              (rebaseErr as Error).message,
+          );
+        }
+
+        // A clean rebase is a line-based three-way merge, not a semantic one: it can
+        // silently splice a non-overlapping concurrent edit — never itself validated
+        // by this server — into the file we're about to push. Re-check every path the
+        // rebased commit touches before retrying the push.
+        for (const relPath of await this.changedPathsSince(this.target())) {
+          try {
+            await this.cfg.validateChangedFile(relPath);
+          } catch (validateErr) {
+            throw new ConflictError(
+              'a concurrent edit conflicts with this write (rebased content failed ' +
+                `validation); nothing was changed: ${(validateErr as Error).message}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
   /** Cheap, lock-free repository status for vault_status. */
   async status(): Promise<{
     headSha: string;
@@ -315,9 +387,19 @@ export class Transactor {
   }> {
     const headSha = await this.git(['rev-parse', 'HEAD']);
     const dirty = await this.isDirty();
-    const ahead = Number(await this.git(['rev-list', '--count', `${this.target()}..HEAD`]));
-    const behind = Number(await this.git(['rev-list', '--count', `HEAD..${this.target()}`]));
-    return { headSha, branch: this.cfg.branch, dirty, ahead, behind };
+    // Reuse the captured headSha rather than the literal ref `HEAD`, which a concurrent
+    // transact() could have advanced by now — otherwise ahead/behind would describe a
+    // different commit than the headSha in the same returned snapshot.
+    const counts = await this.git([
+      'rev-list',
+      '--left-right',
+      '--count',
+      `${this.target()}...${headSha}`,
+    ]);
+    // `A...B` left-right counts are tab-separated as "<only-in-A>\t<only-in-B>", i.e.
+    // behind (commits target has that headSha lacks) then ahead (the reverse).
+    const [behind, ahead] = counts.split('\t').map(Number);
+    return { headSha, branch: this.cfg.branch, dirty, ahead: ahead ?? 0, behind: behind ?? 0 };
   }
 
   async recentChanges(limit: number, path?: string): Promise<string> {

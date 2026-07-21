@@ -80,4 +80,10 @@ describe('wrapper-added tools', () => {
     // Newest first: the write appears before the seed commit.
     expect(text.indexOf('Inbox/Newest.md')).toBeLessThan(text.indexOf('Seed vault'));
   });
+
+  it('list_recent_changes truncates a fractional limit instead of erroring', async () => {
+    const res = await callTool(srv.client, 'list_recent_changes', { limit: 2.7 });
+    expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
+    expect(textOf(res)).toContain('Seed vault');
+  });
 });

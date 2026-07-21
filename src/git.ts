@@ -24,7 +24,11 @@ export interface GitOptions {
  * note paths and commit messages can't inject anything. GIT_TERMINAL_PROMPT=0 because
  * an unattended server must fail loudly instead of hanging on a credential prompt.
  */
-export async function runGit(args: string[], cwd: string, options: GitOptions = {}): Promise<string> {
+export async function runGit(
+  args: string[],
+  cwd: string,
+  options: GitOptions = {},
+): Promise<string> {
   try {
     const { stdout } = await exec('git', args, {
       cwd,
