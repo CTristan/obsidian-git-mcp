@@ -236,7 +236,15 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
 
   outer.setRequestHandler(ListToolsRequestSchema, async () => {
     const { tools } = await innerClient.listTools();
-    const visible = tools.filter((t) => allowDestructive || !DESTRUCTIVE_TOOLS.has(t.name));
+    // Only classified tools are listed, so discovery always matches what's callable —
+    // an unclassified tool from a future MCPVault upgrade stays hidden instead of being
+    // listed and then refused on every call.
+    const visible = tools.filter(
+      (t) =>
+        READ_TOOLS.has(t.name) ||
+        WRITE_TOOLS.has(t.name) ||
+        (allowDestructive && DESTRUCTIVE_TOOLS.has(t.name)),
+    );
     return { tools: [...visible, ...WRAPPER_TOOLS] };
   });
 

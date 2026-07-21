@@ -16,6 +16,18 @@ An MCP server for git-backed Obsidian vaults. Every write an AI collaborator mak
 
 My vault's `main` branch on GitHub is the canonical copy of my second brain, and AI collaborators read and write it directly. The existing git-flavored vault MCP servers either treat the local checkout as a disposable cache the remote overwrites, or batch writes on a debounce timer and push whenever — which means a concurrent edit can silently vanish, and a "successful" write may never reach the remote. That's not acceptable for a vault that multiple agents and my own devices sync against, so this server makes git the transaction boundary: a write either lands as a pushed, attributed, validated commit, or the checkout rolls back and the caller is told why.
 
+## Installing
+
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`:
+
+```sh
+git clone https://github.com/CTristan/obsidian-git-mcp.git
+cd obsidian-git-mcp
+pnpm install && pnpm build
+```
+
+The entry point is `dist/cli.js`, so `node /path/to/obsidian-git-mcp/dist/cli.js` works anywhere the examples below say `obsidian-git-mcp`.
+
 ## Running it
 
 Point the server at a normal git clone of your vault (never your live Obsidian directory — the checkout is the server's workspace and it will hard-reset it to the remote when recovering from a crash):

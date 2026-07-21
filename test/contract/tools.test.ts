@@ -27,6 +27,33 @@ describe('wrapper-added tools', () => {
     expect(status['behind']).toBe(0);
   });
 
+  it('every listed tool is callable — listing never exceeds the classified sets', async () => {
+    // If an MCPVault upgrade adds a tool we haven't classified, it must stay hidden
+    // rather than being listed and then failing every call as "unknown tool". This
+    // pin fails on upgrade until the new tool is classified.
+    const KNOWN = new Set([
+      'read_note',
+      'read_multiple_notes',
+      'search_notes',
+      'list_directory',
+      'get_frontmatter',
+      'get_notes_info',
+      'get_vault_stats',
+      'list_all_tags',
+      'write_note',
+      'patch_note',
+      'update_frontmatter',
+      'manage_tags',
+      'vault_status',
+      'list_recent_changes',
+      'append_to_section',
+    ]);
+    const { tools } = await srv.client.listTools();
+    for (const tool of tools) {
+      expect(KNOWN.has(tool.name), `unclassified tool listed: ${tool.name}`).toBe(true);
+    }
+  });
+
   it('list_recent_changes returns newest-first git history', async () => {
     await callTool(srv.client, 'write_note', { path: 'Inbox/Newest.md', content: '# Newest\n' });
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 10 });

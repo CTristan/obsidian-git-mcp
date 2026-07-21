@@ -9,6 +9,9 @@ const HEADING = /^(#{1,6})\s+(.+?)\s*$/;
  */
 export function appendToSection(content: string, heading: string, text: string): string {
   const wanted = heading.trim();
+  // Match the note's existing line-ending style, because splicing LF lines into a CRLF
+  // note would leave it mixed.
+  const useCRLF = content.includes('\r\n');
   const lines = content.split('\n');
 
   let start = -1;
@@ -23,8 +26,10 @@ export function appendToSection(content: string, heading: string, text: string):
   }
 
   if (start === -1) {
-    const trimmed = content.replace(/\n+$/, '');
-    return `${trimmed}\n\n## ${wanted}\n\n${text}\n`;
+    const eol = useCRLF ? '\r\n' : '\n';
+    const trimmed = content.replace(/[\r\n]+$/, '');
+    const body = text.split('\n').map((l) => l.replace(/\r$/, '')).join(eol);
+    return `${trimmed}${eol}${eol}## ${wanted}${eol}${eol}${body}${eol}`;
   }
 
   let end = lines.length;
@@ -44,6 +49,10 @@ export function appendToSection(content: string, heading: string, text: string):
     }
   }
 
-  lines.splice(insertAt + 1, 0, ...text.split('\n'));
+  const inserted = text.split('\n').map((l) => {
+    const bare = l.replace(/\r$/, '');
+    return useCRLF ? `${bare}\r` : bare;
+  });
+  lines.splice(insertAt + 1, 0, ...inserted);
   return lines.join('\n');
 }

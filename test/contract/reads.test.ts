@@ -40,6 +40,15 @@ describe('reads', () => {
     expect(text).toContain('squirrels');
   });
 
+  it('reads degrade to last-known state when the remote is unreachable', async () => {
+    // Local-first: a transient remote outage must not fail reads — they serve the
+    // last consistent state and the next write surfaces the problem.
+    await git(['remote', 'set-url', 'origin', '/nonexistent/nowhere.git'], fx.serverDir);
+    const res = await callTool(srv.client, 'read_note', { path: 'Projects/Alpha.md' });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Alpha is in flight.');
+  });
+
   it('read_note reflects a collaborator push made after startup', async () => {
     await fx.collabWrite('Inbox/Gamma.md', '# Gamma\n\nFresh from another agent.\n', 'collab: add Gamma');
     const res = await callTool(srv.client, 'read_note', { path: 'Inbox/Gamma.md' });

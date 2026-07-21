@@ -12,7 +12,11 @@ export function forbiddenPathReason(path: string): string | undefined {
   const segments = normalize(path).replaceAll('\\', '/').split('/');
   if (segments.includes('..')) return 'path traversal is not allowed';
   for (const segment of segments) {
-    if (RESTRICTED_SEGMENTS.has(segment.toLowerCase())) {
+    // Win32 strips trailing dots and spaces from path segments, so ".git." and ".git "
+    // resolve to ".git" on disk; fold those aliases before matching (mirrors MCPVault's
+    // canonicalization).
+    const folded = segment.replace(/[. ]+$/, '');
+    if (RESTRICTED_SEGMENTS.has(folded.toLowerCase())) {
       return `paths under ${segment} are not allowed`;
     }
   }

@@ -62,6 +62,22 @@ describe('append_to_section', () => {
     expect(await remoteAlpha(fx)).toBe(expected);
   });
 
+  it('matches the note\'s CRLF line endings instead of mixing styles', async () => {
+    const crlf = '# Win\r\n\r\n## Log\r\n\r\n- one\r\n';
+    await fx.collabWrite('Inbox/Windows.md', crlf, 'collab: add CRLF note');
+
+    const res = await callTool(srv.client, 'append_to_section', {
+      path: 'Inbox/Windows.md',
+      heading: 'Log',
+      text: '- two',
+    });
+    expect(res.isError).toBeFalsy();
+
+    expect(await fx.remoteFile('Inbox/Windows.md')).toBe(
+      '# Win\r\n\r\n## Log\r\n\r\n- one\r\n- two\r\n',
+    );
+  });
+
   it('refuses a missing note instead of inventing one', async () => {
     const res = await callTool(srv.client, 'append_to_section', {
       path: 'Nope/Missing.md',

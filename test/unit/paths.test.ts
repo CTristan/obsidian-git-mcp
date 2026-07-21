@@ -1,0 +1,27 @@
+import { describe, expect, it } from 'vitest';
+import { forbiddenPathReason } from '../../src/paths.js';
+
+describe('forbiddenPathReason', () => {
+  it('refuses traversal, absolute paths, and restricted directories', () => {
+    expect(forbiddenPathReason('../outside.md')).toBeDefined();
+    expect(forbiddenPathReason('/etc/hosts')).toBeDefined();
+    expect(forbiddenPathReason('.git/config')).toBeDefined();
+    expect(forbiddenPathReason('.obsidian/app.json')).toBeDefined();
+    expect(forbiddenPathReason('nested/.obsidian/app.json')).toBeDefined();
+  });
+
+  it('refuses Windows trailing-dot and trailing-space aliases of restricted directories', () => {
+    // Win32 strips trailing dots and spaces from path segments, so ".git." and
+    // ".git " resolve to ".git" on disk — exact matching alone would miss them.
+    expect(forbiddenPathReason('.git./config')).toBeDefined();
+    expect(forbiddenPathReason('.git /config')).toBeDefined();
+    expect(forbiddenPathReason('.Obsidian./app.json')).toBeDefined();
+    expect(forbiddenPathReason('.obsidian ./app.json')).toBeDefined();
+  });
+
+  it('allows ordinary vault paths, including lookalikes', () => {
+    expect(forbiddenPathReason('Projects/Alpha.md')).toBeUndefined();
+    expect(forbiddenPathReason('.gitignore')).toBeUndefined();
+    expect(forbiddenPathReason('notes/data.git.md')).toBeUndefined();
+  });
+});

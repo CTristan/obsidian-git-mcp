@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, SEED_NOTES, type Fixture } from '../fixture.js';
-import { startServer, type TestServer } from '../helpers.js';
+import { callTool, startServer, type TestServer } from '../helpers.js';
 
 describe('startup reconciliation', () => {
   let fx: Fixture;
@@ -29,6 +29,22 @@ describe('startup reconciliation', () => {
     const alpha = await readFile(join(fx.serverDir, 'Projects/Alpha.md'), 'utf8');
     expect(alpha).toBe(SEED_NOTES['Projects/Alpha.md']);
     expect(existsSync(join(fx.serverDir, 'Junk.md'))).toBe(false);
+  });
+
+  it('clears an orphaned lockfile so a crashed process cannot block writes forever', async () => {
+    // A process that dies mid-transaction leaves its lockfile behind; the lock lives
+    // in .git/ so tree recovery never touches it. Startup must clear it, because a
+    // fresh start means any previous holder is dead.
+    await writeFile(join(fx.serverDir, '.git', 'obsidian-git-mcp.lock'), 'pid 99999\n');
+    await writeFile(join(fx.serverDir, 'Junk.md'), 'crash debris\n');
+
+    srv = await startServer(fx);
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/AfterCrash.md',
+      content: '# After\n',
+    });
+    expect(res.isError).toBeFalsy();
   });
 
   it('discards an unpushed local commit', async () => {

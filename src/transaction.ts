@@ -119,6 +119,10 @@ export class Transactor {
    * the caller never received a SHA for it.
    */
   async reconcileAtStartup(): Promise<void> {
+    // A crashed process can't release its lock, and the lock lives in .git/ where tree
+    // recovery never looks. Startup runs before serving, so any existing lockfile is
+    // orphaned. (Two live servers sharing one checkout is unsupported.)
+    await this.releaseLock();
     await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
     this.lastFetchAt = Date.now();
     const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';
@@ -139,7 +143,11 @@ export class Transactor {
   readTransaction<T>(read: () => Promise<T>): Promise<{ headSha: string; result: T }> {
     return this.enqueue(async () => {
       if (Date.now() - this.lastFetchAt >= this.cfg.readFreshnessMs) {
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+        // A transient remote outage degrades reads to last-known state instead of
+        // failing them (writes stay strict — their own fetch is unguarded). The
+        // timestamp advances even on failure so an outage doesn't stall every read
+        // behind a fetch timeout.
+        await this.git(['fetch', this.cfg.remote, this.cfg.branch]).catch(() => {});
         this.lastFetchAt = Date.now();
         if (!(await this.isDirty())) {
           // A diverged checkout can't fast-forward; reads then serve the last consistent

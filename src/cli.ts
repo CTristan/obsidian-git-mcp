@@ -12,7 +12,11 @@ const collaborator =
   process.env['OGM_COLLABORATOR'] ??
   fail('OGM_COLLABORATOR is required — it becomes the git author of every write');
 
-const slug = collaborator.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/^-|-$/g, '');
+// Fall back to a fixed slug when the name has no alphanumerics at all, because an
+// empty local part would make the default author email malformed.
+const slug =
+  collaborator.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/^-|-$/g, '') ||
+  'collaborator';
 
 const server = await createVaultServer({
   vaultPath,
