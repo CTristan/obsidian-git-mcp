@@ -3,15 +3,28 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
+// Matches the userinfo section of a URL ("https://user:token@host"), because a vault
+// remote may embed credentials and git happily echoes such URLs into its own stderr.
+const CREDENTIAL_URL = /:\/\/[^/@\s]+@/g;
+
+function redact(value: string): string {
+  return value.replaceAll(CREDENTIAL_URL, '://***@');
+}
+
 export class GitError extends Error {
   override name = 'GitError';
 
-  constructor(
-    message: string,
-    readonly args: string[],
-    readonly stderr: string,
-  ) {
-    super(message);
+  readonly args: string[];
+  readonly stderr: string;
+
+  // Redaction lives in the constructor, not at the throw site, so every surface a
+  // consumer might log — message, args, stderr — is covered no matter who constructs
+  // the error. GitError is re-exported from the package root and its message can reach
+  // MCP tool responses, which makes an unredacted token a disclosure, not a debug aid.
+  constructor(message: string, args: string[], stderr: string) {
+    super(redact(message));
+    this.args = args.map(redact);
+    this.stderr = redact(stderr);
   }
 }
 

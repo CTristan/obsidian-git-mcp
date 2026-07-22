@@ -1,11 +1,34 @@
+import { existsSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
-import { LockError, Transactor } from '../../src/transaction.js';
+import {
+  HiddenIgnoredWriteError,
+  LockError,
+  Transactor,
+  type TransactorConfig,
+} from '../../src/transaction.js';
 
 vi.mock('node:fs/promises', { spy: true });
+
+// Every Transactor test builds the same config; centralize the defaults (Test Agent
+// author, obsidian-git-mcp service, zero throttle, no retries, no-op validation) so a
+// test declares only what it varies through overrides.
+function makeTransactor(fx: Fixture, overrides: Partial<TransactorConfig> = {}): Transactor {
+  return new Transactor({
+    vaultPath: fx.serverDir,
+    branch: 'main',
+    remote: 'origin',
+    collaborator: { name: 'Test Agent', email: 'agent@test.local' },
+    service: { name: 'obsidian-git-mcp', email: 'service@obsidian-git-mcp.local' },
+    readFreshnessMs: 0,
+    maxPushRetries: 0,
+    validateChangedFile: async () => {},
+    ...overrides,
+  });
+}
 
 describe('Transactor.status', () => {
   let fx: Fixture;
@@ -24,15 +47,7 @@ describe('Transactor.status', () => {
     // and its ahead/behind computation. Simulate that landing right after status()'s
     // first git call.
     let calls = 0;
-    const transactor = new Transactor({
-      vaultPath: fx.serverDir,
-      branch: 'main',
-      remote: 'origin',
-      collaborator: { name: 'Test Agent', email: 'agent@test.local' },
-      service: { name: 'obsidian-git-mcp', email: 'service@obsidian-git-mcp.local' },
-      readFreshnessMs: 0,
-      maxPushRetries: 0,
-      validateChangedFile: async () => {},
+    const transactor = makeTransactor(fx, {
       onGitCall: async () => {
         calls++;
         if (calls === 1) {
@@ -89,16 +104,7 @@ describe('Transactor.reconcileAtStartup', () => {
     });
 
     try {
-      const transactor = new Transactor({
-        vaultPath: fx.serverDir,
-        branch: 'main',
-        remote: 'origin',
-        collaborator: { name: 'Test Agent', email: 'agent@test.local' },
-        service: { name: 'obsidian-git-mcp', email: 'service@obsidian-git-mcp.local' },
-        readFreshnessMs: 0,
-        maxPushRetries: 0,
-        validateChangedFile: async () => {},
-      });
+      const transactor = makeTransactor(fx);
 
       const err: unknown = await transactor.reconcileAtStartup().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(LockError);
@@ -134,16 +140,7 @@ describe('Transactor ignored-file change signal', () => {
     const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
     await writeFile(ignoredPath, 'x'.repeat(1024));
 
-    const transactor = new Transactor({
-      vaultPath: fx.serverDir,
-      branch: 'main',
-      remote: 'origin',
-      collaborator: { name: 'Test Agent', email: 'agent@test.local' },
-      service: { name: 'obsidian-git-mcp', email: 'service@obsidian-git-mcp.local' },
-      readFreshnessMs: 0,
-      maxPushRetries: 0,
-      validateChangedFile: async () => {},
-    });
+    const transactor = makeTransactor(fx);
 
     const readFileSpy = vi.mocked(fsPromises.readFile);
     const lstatSpy = vi.mocked(fsPromises.lstat);
@@ -156,5 +153,42 @@ describe('Transactor ignored-file change signal', () => {
 
     expect(lstatSpy.mock.calls.some(([path]) => path === ignoredPath)).toBe(true);
     expect(readFileSpy.mock.calls.some(([path]) => path === ignoredPath)).toBe(false);
+  });
+
+  it('refuses the whole transaction when a mutation touches a tracked file and creates a newly-ignored one', async () => {
+    // git add -A cannot stage a gitignored path, so committing the tracked change
+    // alongside would push a partial write and leave the ignored file on disk. The whole
+    // transaction must roll back instead — tracked edit reverted, ignored file removed.
+    // Driven through the Transactor directly because no single tool call both edits a
+    // tracked note and creates an ignored one.
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+    // Sync .gitignore before the write, or private/notes.md is untracked (dirty), not
+    // ignored — transact() snapshots the ignored set before its own fetch/merge runs.
+    await git(['fetch', 'origin', 'main'], fx.serverDir);
+    await git(['merge', '--ff-only', 'origin/main'], fx.serverDir);
+
+    const transactor = makeTransactor(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await git(['rev-parse', 'main'], fx.bareDir);
+    const trackedPath = join(fx.serverDir, 'Inbox', 'Beta.md');
+    const trackedBefore = await fsPromises.readFile(trackedPath, 'utf8');
+    const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
+
+    const err: unknown = await transactor
+      .transact('tracked edit plus a newly-ignored file', async () => {
+        await writeFile(trackedPath, '# Beta\n\nmutated body\n');
+        await mkdir(join(fx.serverDir, 'private'), { recursive: true });
+        await writeFile(ignoredPath, '# Private\n');
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HiddenIgnoredWriteError);
+    expect((err as Error).message.toLowerCase()).toContain('gitignore');
+    // Nothing pushed; both effects rolled back.
+    expect(await git(['rev-parse', 'main'], fx.bareDir)).toBe(preRemote);
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    expect(await fsPromises.readFile(trackedPath, 'utf8')).toBe(trackedBefore);
+    expect(existsSync(ignoredPath)).toBe(false);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });
 });

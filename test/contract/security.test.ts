@@ -269,6 +269,23 @@ describe('security', () => {
     await expectCleanWorkingTree(fx);
   });
 
+  it('append_to_section through an in-vault symlink to an in-vault note still resolves it', async () => {
+    // realpath containment runs before the fd-pinned open, so an in-vault symlink whose
+    // target is itself an in-vault note stays allowed exactly as before — the append
+    // lands on the resolved target and commits it. This locks that behavior against the
+    // fd-pin hardening: closing the TOCTOU window must not change which paths resolve.
+    await commitSymlink(fx, 'AlphaLink.md', 'Projects/Alpha.md', 'collab: add in-vault symlink');
+
+    const res = await callTool(srv.client, 'append_to_section', {
+      path: 'AlphaLink.md',
+      heading: 'Decisions',
+      text: '- Via the link.',
+    });
+    expect(res.isError).toBeFalsy();
+    // The write followed the symlink onto the real note; the target carries the append.
+    expect(await fx.remoteFile('Projects/Alpha.md')).toContain('- Via the link.');
+  });
+
   it('list_directory omits .obsidian', async () => {
     const res = await callTool(srv.client, 'list_directory', { path: '' });
     expect(res.isError).toBeFalsy();

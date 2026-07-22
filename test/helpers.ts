@@ -26,14 +26,26 @@ export async function startServer(
     ...overrides,
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
   const client = new Client({ name: 'contract-tests', version: '0.0.0' });
-  await client.connect(clientTransport);
+  // A connect failure would otherwise leak the already-created server (and its
+  // startup-reconciled checkout state) into the rest of the test run.
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+  } catch (err) {
+    await server.close().catch(() => {});
+    throw err;
+  }
   return {
     client,
     async close() {
-      await client.close();
-      await server.close();
+      // finally, not sequential awaits: the server must close even when the client's
+      // close rejects, or one bad test poisons every later fixture.
+      try {
+        await client.close();
+      } finally {
+        await server.close();
+      }
     },
   };
 }

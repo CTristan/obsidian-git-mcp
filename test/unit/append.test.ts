@@ -178,6 +178,101 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('does not open a fence on a 4-space-indented marker (indented code, not a fence)', () => {
+    // Per CommonMark a fence opener may be indented at most 3 spaces — a line indented 4+
+    // is an indented code block, so "    ```" must not open a fence that then masks the
+    // real "## Log" heading and forces a duplicate section at the end of the note.
+    const note = [
+      '# T',
+      '',
+      '    ```',
+      '',
+      '## Log',
+      '',
+      '- one',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '    ```',
+      '',
+      '## Log',
+      '',
+      '- one',
+      '- two',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('opens and closes a fence indented 1-3 spaces (inner heading stays masked)', () => {
+    // A marker indented 0-3 spaces is still a valid fence, so a 2-space-indented "  ```"
+    // opens the fence and its 2-space-indented twin closes it — the "## Fake" between them
+    // stays masked instead of ending the "Log" section early.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '  ```',
+      '## Fake',
+      '  ```',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '  ```',
+      '## Fake',
+      '  ```',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('does not open a fence on a tab-indented marker (tab counts as indented code)', () => {
+    // A tab is indented code, not the 0-3 leading spaces a fence opener allows, so "\t```"
+    // must not open a fence that masks the following "## Log" heading into a duplicate.
+    const note = [
+      '# T',
+      '',
+      '\t```',
+      '',
+      '## Log',
+      '',
+      '- one',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '\t```',
+      '',
+      '## Log',
+      '',
+      '- one',
+      '- two',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
   it('keeps a wider tilde fence open across a narrower inner run of the same marker', () => {
     const note = [
       '# T',

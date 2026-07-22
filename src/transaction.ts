@@ -50,6 +50,8 @@ export interface TransactorConfig {
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
  * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
  * pre-transaction checkout, because a write that didn't reach the remote never happened.
+ * A mutation that creates a gitignored path is refused outright — git can neither stage
+ * nor commit one, so letting the transaction "succeed" would drop that write silently.
  */
 export class Transactor {
   private chain: Promise<unknown> = Promise.resolve();
@@ -320,8 +322,31 @@ export class Transactor {
         const newlyIgnored = (await this.ignoredFiles()).filter(
           (path) => !ignoredBeforeSet.has(path),
         );
-        const toValidate = [...changed, ...newlyIgnored];
-        if (toValidate.length === 0) {
+
+        // Validate each newly-ignored path first, because a .obsidian/.git write must keep
+        // its specific by-name refusal — that guard throws before the generic ignored-write
+        // refusal below collapses every remaining case into one message.
+        for (const relPath of newlyIgnored) {
+          await this.cfg.validateChangedFile(relPath);
+        }
+        if (newlyIgnored.length > 0) {
+          // git can neither stage nor commit a gitignored path, so this write cannot land —
+          // we refuse the whole transaction even when tracked changes sit alongside, because
+          // committing those would silently drop the ignored write and leave it on disk
+          // (rollback's clean -fd never removes an ignored file). Unlink each first; that's
+          // safe because a newlyIgnored path did not exist as an ignored file pre-transaction,
+          // and a tracked-then-recreated one is restored by the catch block's reset --hard.
+          // ls-files --ignored lists files, never directories, so unlink is the right removal.
+          for (const relPath of newlyIgnored) {
+            await unlink(join(this.cfg.vaultPath, relPath)).catch(() => {});
+          }
+          throw new HiddenIgnoredWriteError(
+            `the mutation created gitignored path(s) [${newlyIgnored.join(', ')}] that git ` +
+              'can neither stage nor commit; refusing the write',
+          );
+        }
+
+        if (changed.length === 0) {
           if ((await this.ignoredFingerprint(ignoredBefore)) !== ignoredBeforeFingerprint) {
             // git can neither stage nor commit an already-ignored path, so there is no
             // safe way to land this edit — only to refuse it and say so, instead of
@@ -333,7 +358,7 @@ export class Transactor {
           }
           return rollbackTo;
         }
-        for (const relPath of toValidate) {
+        for (const relPath of changed) {
           await this.cfg.validateChangedFile(relPath);
         }
 

@@ -1,7 +1,11 @@
 // The optional trailing group strips a closed-ATX marker ("## Log ##"), which needs
 // whitespace before it — a bare trailing # ("## C#") is part of the name.
 const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
-const FENCE = /^(`{3,}|~{3,})/;
+// A fence marker may be indented 0-3 spaces per CommonMark; 4+ spaces (or any leading
+// tab) is an indented code block, not a fence, so we match the raw line and cap the
+// leading run at three spaces rather than trimming — trimming would let "    ```" or a
+// tab-indented "\t```" wrongly open a fence and mask every later real heading.
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 // A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
 // line inside a ``` example); both scans below need to ignore those, so this returns,
@@ -17,8 +21,7 @@ function fenceMask(lines: readonly string[]): boolean[] {
   let fenceLen = 0;
   return lines.map((line) => {
     const wasFenced = inFence;
-    const trimmed = line.trim();
-    const m = FENCE.exec(trimmed);
+    const m = FENCE.exec(line);
     if (m) {
       const marker = m[1]!;
       if (!inFence) {
@@ -29,8 +32,9 @@ function fenceMask(lines: readonly string[]): boolean[] {
         marker[0] === fenceChar &&
         marker.length >= fenceLen &&
         // A closing fence marker may be followed only by whitespace (CommonMark) — a
-        // trailing info string like "``` not-a-close" leaves the fence open.
-        trimmed.slice(marker.length).trim() === ''
+        // trailing info string like "``` not-a-close" leaves the fence open. m[0] spans
+        // the leading indent plus the marker, so slice the raw line from there.
+        line.slice(m[0].length).trim() === ''
       ) {
         inFence = false;
       }

@@ -339,4 +339,28 @@ describe('transaction safety', () => {
     const hiddenSuccess = !res.isError && commitShaOf(res) === preHead && postContent !== original;
     expect(hiddenSuccess).toBe(false);
   });
+
+  it('a write that only creates a newly-gitignored file is refused, not left on disk', async () => {
+    // A benign-named note under a gitignored dir passes the path filter (no .obsidian/ or
+    // traversal), but git can neither stage nor commit it. The transaction must refuse and
+    // remove the file, because otherwise the commit dies on "nothing to commit" and
+    // rollback's clean -fd (no -x) leaves the untracked, ignored file behind on disk.
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+
+    srv = await startServer(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await fx.bareHead();
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'private/notes.md',
+      content: '# Private\n\nsecret\n',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('gitignore');
+
+    expect(existsSync(join(fx.serverDir, 'private', 'notes.md'))).toBe(false);
+    expect(await fx.bareHead()).toBe(preRemote);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
 });

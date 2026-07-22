@@ -1,4 +1,5 @@
-import { readFile, readlink, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, readFile, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -298,6 +299,33 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   ): Promise<CallToolResult> =>
     (await innerClient.callTool({ name, arguments: args })) as CallToolResult;
 
+  // Resolves every write-path arg to where it would actually land on disk and refuses one
+  // that escapes the vault or hits a restricted segment. We run it both before MCPVault's
+  // write (a pre-existing malicious symlink) and after it (a component swapped
+  // mid-transaction), so the two callers must stay identical — a shared helper is the only
+  // way they can't drift. `swapContext` tails the message so the post-write caller can name
+  // the race without duplicating the loop.
+  const assertWriteDestinationsContained = async (
+    args: Record<string, unknown>,
+    swapContext: string,
+  ): Promise<void> => {
+    for (const key of ['path', 'oldPath', 'newPath']) {
+      const value = args[key];
+      if (typeof value !== 'string') continue;
+      const destination = await resolveWriteDestination(vaultPath, value);
+      if (destination === undefined) {
+        throw new InnerToolError(`${value}: symlink chain is too deep or cyclic${swapContext}`);
+      }
+      const withinVault = destination.startsWith(realVaultPath + sep);
+      const reason = withinVault
+        ? forbiddenPathReason(relative(realVaultPath, destination))
+        : 'refusing to follow a symlink outside the vault';
+      if (reason) {
+        throw new InnerToolError(`${value}: ${reason}${swapContext}`);
+      }
+    }
+  };
+
   const forwardWrite = async (
     name: string,
     args: Record<string, unknown>,
@@ -315,33 +343,32 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     }
     let result: CallToolResult | undefined;
     const sha = await transactor.transact(commitMessageFor(name, args), async () => {
-      // MCPVault's own filter only judges the literal argument string, so a symlink
-      // whose name looks unremarkable (e.g. "Linked.md") can still resolve onto a
-      // restricted path or outside the vault entirely once followed — and MCPVault
-      // follows a pre-existing symlink itself, so this has to run before callInner, not
-      // after: by the time an escape is visible in the *result*, the write (or delete)
-      // has already happened. Runs inside the transaction, after fetch/fast-forward, so
-      // it also covers a symlink that only just arrived from the remote (mirrors
-      // appendTool's own ordering below).
-      for (const key of ['path', 'oldPath', 'newPath']) {
-        const value = args[key];
-        if (typeof value !== 'string') continue;
-        const destination = await resolveWriteDestination(vaultPath, value);
-        if (destination === undefined) {
-          throw new InnerToolError(`${value}: symlink chain is too deep or cyclic`);
-        }
-        const withinVault = destination.startsWith(realVaultPath + sep);
-        const reason = withinVault
-          ? forbiddenPathReason(relative(realVaultPath, destination))
-          : 'refusing to follow a symlink outside the vault';
-        if (reason) {
-          throw new InnerToolError(`${value}: ${reason}`);
-        }
-      }
+      // MCPVault's own filter only judges the literal argument string, so a symlink whose
+      // name looks unremarkable (e.g. "Linked.md") can still resolve onto a restricted
+      // path or outside the vault once followed — and MCPVault follows a pre-existing
+      // symlink itself, so this runs before callInner: by the time an escape is visible in
+      // the *result*, the write (or delete) has already happened. It runs inside the
+      // transaction (after fetch/fast-forward), so it also covers a symlink that only just
+      // arrived from the remote (mirrors appendTool's ordering below).
+      //
+      // Residual window, stated honestly: MCPVault does the final path resolution for
+      // delegated writes, so a local attacker swapping a symlink component between this
+      // check and MCPVault's own resolution can still redirect that one write. The
+      // post-write re-check below narrows it but can't fully close it, because closing it
+      // needs dirfd-relative I/O (openat) that Node's fs API doesn't expose without a
+      // native dependency. That attacker already has local write access as this uid, so
+      // there's no privilege gain — while the remote-planted-symlink attack a git-synced
+      // vault actually faces has no race at all and stays fully covered by these
+      // in-transaction checks.
+      await assertWriteDestinationsContained(args, '');
       result = await callInner(name, args);
       if (result.isError) {
         throw new InnerToolError(textOf(result));
       }
+      // Re-resolve after MCPVault's write: a component swapped mid-transaction would have
+      // let a redirected write land, so catching it here rolls the transaction back
+      // instead of committing and pushing a tampered tree.
+      await assertWriteDestinationsContained(args, ' (concurrent path swap detected)');
     });
     if (!result) {
       throw new Error(`${name}: transact() resolved without running mutate`);
@@ -361,6 +388,16 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     const reason = forbiddenPathReason(path);
     if (reason) {
       return errorResult(`${path}: ${reason}`);
+    }
+    // Constrain appends to note files, because this tool writes the filesystem directly
+    // instead of forwarding to MCPVault — so nothing else applies MCPVault's own
+    // NOTE_EXTENSIONS filter, and validateNoteContent only runs for note files. Without
+    // this an append would write unvalidated content to any non-note file (a .canvas, an
+    // image, .gitattributes).
+    if (!isNoteFile(path)) {
+      return errorResult(
+        `${path}: append_to_section only writes note files (${NOTE_EXTENSIONS.join(', ')})`,
+      );
     }
     const absPath = resolve(vaultPath, path);
     if (!absPath.startsWith(vaultPath + sep)) {
@@ -384,8 +421,36 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (reason) {
         throw new InnerToolError(`${path}: ${reason}`);
       }
-      const content = await readFile(real, 'utf8');
-      await writeFile(real, appendToSection(content, heading, text));
+      // fd-pin the write against a TOCTOU swap between this resolution and the write. We
+      // open the resolved target with O_NOFOLLOW (its final hop can't be turned into a
+      // symlink under us), then re-resolve absPath and match the handle's inode against
+      // the path's before trusting it. Soundness: a swap BEFORE open is caught here — the
+      // path no longer maps to the pinned inode or it now escapes the vault; a swap AFTER
+      // open can't redirect anything, because the fd is already bound to the validated
+      // inode, not to a name the attacker can re-point.
+      let handle: FileHandle | undefined;
+      try {
+        handle = await open(real, constants.O_RDWR | constants.O_NOFOLLOW);
+        const reReal = await realpath(absPath);
+        const reReason = reReal.startsWith(realVaultPath + sep)
+          ? forbiddenPathReason(relative(realVaultPath, reReal))
+          : 'refusing to follow a symlink outside the vault';
+        if (reReal !== real || reReason) {
+          throw new InnerToolError(`${path}: path changed during the write`);
+        }
+        const [handleStat, pathStat] = await Promise.all([handle.stat(), stat(real)]);
+        if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
+          throw new InnerToolError(`${path}: path changed during the write`);
+        }
+        const content = await handle.readFile('utf8');
+        const updated = Buffer.from(appendToSection(content, heading, text));
+        // truncate first, because FileHandle.writeFile does NOT — a shrinking write would
+        // otherwise leave stale trailing bytes and corrupt the note.
+        await handle.truncate(0);
+        await handle.write(updated, 0, updated.length, 0);
+      } finally {
+        await handle?.close();
+      }
     });
     return textResult(`Appended to "${heading}" in ${path}`, { commitSha: sha });
   };

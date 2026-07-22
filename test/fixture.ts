@@ -84,8 +84,30 @@ export async function createFixture(): Promise<Fixture> {
   const seedDir = join(root, 'seed');
   const serverDir = join(root, 'server');
   const collabDir = join(root, 'collab');
-  const outsideDir = await mkdtemp(join(tmpdir(), 'ogm-outside-'));
+  let outsideDir: string | undefined;
 
+  // A failure below throws before cleanup() is ever handed to the caller, so this is
+  // the only place that can reap the temp dirs a half-built fixture leaves behind.
+  try {
+    outsideDir = await mkdtemp(join(tmpdir(), 'ogm-outside-'));
+    return await buildFixture(root, bareDir, seedDir, serverDir, collabDir, outsideDir);
+  } catch (err) {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+    if (outsideDir !== undefined) {
+      await rm(outsideDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+async function buildFixture(
+  root: string,
+  bareDir: string,
+  seedDir: string,
+  serverDir: string,
+  collabDir: string,
+  outsideDir: string,
+): Promise<Fixture> {
   await mkdir(bareDir);
   await git(['init', '--bare', '-b', 'main', '.'], bareDir);
 
