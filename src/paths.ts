@@ -23,15 +23,21 @@ export function forbiddenPathReason(path: string): string | undefined {
   const segments = normalize(path).replaceAll('\\', '/').split('/');
   if (segments.includes('..')) return 'path traversal is not allowed';
   for (const segment of segments) {
+    // A segment of nothing but dots and spaces (".. ", ". .") is never a real note name,
+    // and Win32's trailing-strip folds it to "." or "..", so ".. /x" would resolve to a
+    // parent-directory escape the raw ".." check above can't see. Refuse the whole class.
+    if (/^[. ]+$/.test(segment)) {
+      return 'path traversal is not allowed';
+    }
     // On NTFS, ':' addresses an alternate data stream, so "note.md:payload" or
     // ".git:payload" still resolve to the base file/directory on disk.
     if (segment.includes(':')) {
       return 'alternate data streams are not allowed';
     }
-    // Win32 strips trailing dots and spaces from path segments, so ".git." and ".git "
-    // resolve to ".git" on disk; fold those aliases before matching (mirrors MCPVault's
-    // canonicalization).
-    const folded = segment.replace(/[. ]+$/, '');
+    // Win32 strips a segment's trailing dots and spaces and ignores leading spaces, so
+    // ".git.", ".git ", and " .git" all resolve to ".git" on disk; fold both edges before
+    // matching (mirrors MCPVault's canonicalization).
+    const folded = segment.replace(/^ +/, '').replace(/[. ]+$/, '');
     if (RESTRICTED_SEGMENTS.has(folded.toLowerCase())) {
       return `paths under ${segment} are not allowed`;
     }

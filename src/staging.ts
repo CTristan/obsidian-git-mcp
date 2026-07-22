@@ -89,6 +89,24 @@ export async function manifestOf(dir: string): Promise<Manifest> {
   return manifest;
 }
 
+/**
+ * Write every byte of `bytes` at absolute offset 0 of an already-open, already-truncated
+ * handle, looping until nothing remains. A single FileHandle.write can report a short
+ * write on a regular file, which — because callers truncate first — would otherwise leave
+ * a note holding only a prefix of its intended content. Passing an explicit position each
+ * pass keeps the write independent of the handle's own offset.
+ */
+export async function writeAllAt(handle: FileHandle, bytes: Buffer): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, offset);
+    if (bytesWritten === 0) {
+      throw new Error('write made no progress');
+    }
+    offset += bytesWritten;
+  }
+}
+
 function isUnchanged(before: ManifestEntry | undefined, after: ManifestEntry): boolean {
   return (
     before !== undefined &&
@@ -135,7 +153,7 @@ async function writeIntoVault(
     }
     // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
     await handle.truncate(0);
-    await handle.write(bytes, 0, bytes.length, 0);
+    await writeAllAt(handle, bytes);
   } finally {
     await handle?.close();
   }

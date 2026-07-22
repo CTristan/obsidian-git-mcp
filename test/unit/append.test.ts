@@ -311,4 +311,30 @@ describe('appendToSection', () => {
     ].join('\n');
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
+
+  it('does not prepend blank lines when creating a section in an empty note', () => {
+    // First-use case: an empty (or whitespace-only) note must start with the new heading,
+    // not two blank lines before it.
+    expect(appendToSection('', 'Log', '- one')).toBe('## Log\n\n- one\n');
+    expect(appendToSection('\n\n', 'Log', '- one')).toBe('## Log\n\n- one\n');
+  });
+
+  it('appends after the closing fence when a section ends with a code block', () => {
+    // The section's last real line is the closing ``` (a masked line), and inserting
+    // after it lands the text OUTSIDE the block. Locking this guards against a fence-skip
+    // "fix" to the insert scan that would instead land the append after the opener and
+    // swallow it into the code.
+    const note = ['# T', '', '## Log', '', '```', 'code', '```', ''].join('\n');
+    const expected = ['# T', '', '## Log', '', '```', 'code', '```', '- added', ''].join('\n');
+    expect(appendToSection(note, 'Log', '- added')).toBe(expected);
+  });
+
+  it('does not swallow the append into a section whose fence never closes', () => {
+    // A stored note with an unterminated fence running to end-of-file has no line that is
+    // both real and outside the block, so the append goes right after the heading rather
+    // than inside the open code block.
+    const note = ['# T', '', '## Log', '', '```', 'code line', ''].join('\n');
+    const expected = ['# T', '', '## Log', '- added', '', '```', 'code line', ''].join('\n');
+    expect(appendToSection(note, 'Log', '- added')).toBe(expected);
+  });
 });

@@ -15,11 +15,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 // by a line whose leading run is the same character and at least N long — a narrower or
 // different-character run inside the fence (e.g. a 3-backtick line documenting fence
 // syntax inside a 4-backtick fence) must not close it.
-function fenceMask(lines: readonly string[]): boolean[] {
+function fenceMask(lines: readonly string[]): { mask: boolean[]; endsOpen: boolean } {
   let inFence = false;
   let fenceChar = '';
   let fenceLen = 0;
-  return lines.map((line) => {
+  const mask = lines.map((line) => {
     const wasFenced = inFence;
     const m = FENCE.exec(line);
     if (m) {
@@ -41,6 +41,9 @@ function fenceMask(lines: readonly string[]): boolean[] {
     }
     return wasFenced;
   });
+  // endsOpen reports whether the note finishes inside an unclosed fence — the signal the
+  // insert scan needs to avoid dropping an append into a code block that never terminates.
+  return { mask, endsOpen: inFence };
 }
 
 /**
@@ -63,7 +66,7 @@ export function appendToSection(content: string, heading: string, text: string):
   // note would leave it mixed.
   const useCRLF = content.includes('\r\n');
   const lines = content.split('\n');
-  const fenced = fenceMask(lines);
+  const { mask: fenced, endsOpen } = fenceMask(lines);
 
   let start = -1;
   let level = 0;
@@ -81,7 +84,10 @@ export function appendToSection(content: string, heading: string, text: string):
     const eol = useCRLF ? '\r\n' : '\n';
     const trimmed = content.replace(/[\r\n]+$/, '');
     const body = text.split('\n').map((l) => l.replace(/\r$/, '')).join(eol);
-    return `${trimmed}${eol}${eol}## ${wanted}${eol}${eol}${body}${eol}`;
+    // Skip the leading blank separator when the note is empty (or only newlines), so a
+    // brand-new note starts with the heading rather than two blank lines before it.
+    const prefix = trimmed === '' ? '' : `${trimmed}${eol}${eol}`;
+    return `${prefix}## ${wanted}${eol}${eol}${body}${eol}`;
   }
 
   let end = lines.length;
@@ -95,10 +101,16 @@ export function appendToSection(content: string, heading: string, text: string):
   }
 
   let insertAt = start;
-  for (let i = end - 1; i > start; i--) {
-    if (lines[i]!.trim() !== '') {
-      insertAt = i;
-      break;
+  // When the section runs to end-of-file inside a fence that never closes, every trailing
+  // line is code-block content; the backward scan below would land the append among those
+  // lines and swallow it. Insert right after the heading instead. A closed fence doesn't
+  // hit this — its closing delimiter is a real line the scan correctly appends after.
+  if (!(end === lines.length && endsOpen)) {
+    for (let i = end - 1; i > start; i--) {
+      if (lines[i]!.trim() !== '') {
+        insertAt = i;
+        break;
+      }
     }
   }
 

@@ -14,7 +14,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { appendToSection } from './append.js';
 import { forbiddenPathReason } from './paths.js';
-import { applyCloneDiff, cloneWorktree, manifestOf } from './staging.js';
+import { applyCloneDiff, cloneWorktree, manifestOf, writeAllAt } from './staging.js';
 import { Transactor, type Identity } from './transaction.js';
 import { validateNoteContent, ValidationError } from './validate.js';
 
@@ -377,14 +377,27 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         await stageServer.connect(stageServerTransport);
         const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
         await stageClient.connect(stageClientTransport);
+        let callError: unknown;
         try {
           result = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
+        } catch (err) {
+          callError = err;
         } finally {
           const closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
           const failed = closes.find((r) => r.status === 'rejected');
+          // Prefer the real tool failure — a close rejection on top of it is noise that
+          // would otherwise mask the error the caller actually needs.
+          if (callError !== undefined) {
+            throw callError;
+          }
           if (failed && result === undefined) {
             throw (failed as PromiseRejectedResult).reason;
           }
+        }
+        // Reaching here means the staged call assigned a result — the finally re-throws
+        // callError on any rejection — so this both narrows the type and states that invariant.
+        if (result === undefined) {
+          throw new Error(`${name}: staged call resolved without a result`);
         }
         if (result.isError) {
           throw new InnerToolError(textOf(result));
@@ -479,10 +492,10 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         }
         const content = await handle.readFile('utf8');
         const updated = Buffer.from(appendToSection(content, heading, text));
-        // truncate first, because FileHandle.writeFile does NOT — a shrinking write would
-        // otherwise leave stale trailing bytes and corrupt the note.
+        // truncate first, because a shrinking write would otherwise leave stale trailing
+        // bytes; writeAllAt then loops past any short write that would corrupt the note.
         await handle.truncate(0);
-        await handle.write(updated, 0, updated.length, 0);
+        await writeAllAt(handle, updated);
       } finally {
         await handle?.close();
       }

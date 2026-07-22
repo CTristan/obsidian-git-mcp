@@ -26,6 +26,22 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('.obsidian ./app.json')).toBeDefined();
   });
 
+  it('refuses dot-and-space-only segments that Win32 folds to a traversal', () => {
+    // Win32 strips a segment's trailing dots and spaces, so ".. " resolves to ".." — a
+    // traversal the raw split(/) check misses because ".. " !== "..". A segment made of
+    // only dots and spaces is never a legitimate note name, so refuse the whole class.
+    expect(forbiddenPathReason('.. /outside.md')).toBeDefined();
+    expect(forbiddenPathReason('a/.. /b.md')).toBeDefined();
+    expect(forbiddenPathReason('. ./outside.md')).toBeDefined();
+  });
+
+  it('refuses a leading-space alias of a restricted directory', () => {
+    // The trailing-fold missed a leading space: " .obsidian" shares the restricted
+    // target once the space is folded away.
+    expect(forbiddenPathReason(' .obsidian/app.json')).toBeDefined();
+    expect(forbiddenPathReason(' .git/config')).toBeDefined();
+  });
+
   it('allows ordinary vault paths, including lookalikes', () => {
     expect(forbiddenPathReason('Projects/Alpha.md')).toBeUndefined();
     expect(forbiddenPathReason('.gitignore')).toBeUndefined();

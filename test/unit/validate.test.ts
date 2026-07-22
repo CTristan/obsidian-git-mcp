@@ -79,4 +79,38 @@ describe('validateNoteContent', () => {
   it('passes plain content with no frontmatter at all', () => {
     expect(() => validateNoteContent('Note.md', 'Just a body, no frontmatter.\n')).not.toThrow();
   });
+
+  it('refuses executable JavaScript frontmatter instead of running it', () => {
+    // gray-matter's js/javascript engines evaluate the frontmatter body in-process, so a
+    // note carrying `---js` is remote code execution the moment we validate it — and we
+    // validate every changed file, including ones fetched from the remote. The engine
+    // must be refused, and the payload must never run.
+    (globalThis as Record<string, unknown>)['__validateProbe'] = false;
+    const payload = [
+      '---js',
+      'module.exports = { t: ((globalThis.__validateProbe = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    expect(() => validateNoteContent('Note.md', payload)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+    // The `javascript` alias reaches the same engine.
+    const aliased = payload.replace('---js', '---javascript');
+    expect(() => validateNoteContent('Note.md', aliased)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+  });
+
+  it('refuses a YAML frontmatter that deserializes a js/function tag', () => {
+    // Defense-in-depth guard: gray-matter's YAML engine uses js-yaml safe-load, which
+    // rejects the !!js/function tag rather than constructing a callable — this locks that
+    // in, so a dependency bump that re-enabled unsafe load would fail here.
+    const payload = [
+      '---',
+      'evil: !!js/function >',
+      '  function () { return 1; }',
+      '---',
+      'body',
+    ].join('\n');
+    expect(() => validateNoteContent('Note.md', payload)).toThrow(ValidationError);
+  });
 });
