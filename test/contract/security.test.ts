@@ -353,6 +353,31 @@ describe('security', () => {
     expect((globalThis as Record<string, unknown>)['__ogmRceProbeUntargeted']).toBe(false);
   });
 
+  it('patch_note refuses a note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
+    // transact()'s own fetch/ff-only-merge can land this note before mutate() ever runs —
+    // no prior read_note call required. patch_note's readNote() would otherwise hand the
+    // payload straight to gray-matter's default (unsafe) engines the moment the write tool
+    // tries to load the note it's about to patch.
+    (globalThis as Record<string, unknown>)['__ogmRceProbeWrite'] = false;
+    const payload = [
+      '---js',
+      'module.exports = { t: ((globalThis.__ogmRceProbeWrite = true), "x") }',
+      '---',
+      'original body',
+    ].join('\n');
+    await fx.collabWrite('Malicious3.md', payload, 'collab: add malicious note');
+
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'patch_note', {
+      path: 'Malicious3.md',
+      oldString: 'original body',
+      newString: 'pwned',
+    });
+    expect(res.isError).toBe(true);
+    expect((globalThis as Record<string, unknown>)['__ogmRceProbeWrite']).toBe(false);
+    await expectRemoteUnchanged(fx, preRemote);
+  });
+
   it('read_multiple_notes is refused wholesale when one path targets .git', async () => {
     // MCPVault denies the individual path internally but reports it in a non-error "err"
     // array rather than isError, so a caller that only checks isError sees this as a

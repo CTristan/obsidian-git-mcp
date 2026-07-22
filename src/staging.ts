@@ -71,23 +71,29 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
 export async function manifestOf(dir: string): Promise<Manifest> {
   const manifest: Manifest = new Map();
   const walk = async (cur: string, prefix: string): Promise<void> => {
-    for (const dirent of await readdir(cur, { withFileTypes: true })) {
-      const abs = join(cur, dirent.name);
-      const rel = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
-      // isDirectory()/isSymbolicLink() come from readdir's own lstat, so a symlink to a
-      // directory is a symlink here, not a directory — it's recorded, not descended into.
-      if (dirent.isDirectory()) {
-        await walk(abs, rel);
-        continue;
-      }
-      const st = await lstat(abs, { bigint: true });
-      manifest.set(rel, {
-        size: st.size,
-        mtimeNs: st.mtimeNs,
-        ino: st.ino,
-        isSymlink: dirent.isSymbolicLink(),
-      });
-    }
+    const dirents = await readdir(cur, { withFileTypes: true });
+    // Every entry's lstat (or recursive walk) is independent of every other's, so batch
+    // the whole directory through Promise.all instead of awaiting one entry at a time —
+    // otherwise scan latency scales linearly with the vault's total file count.
+    await Promise.all(
+      dirents.map(async (dirent) => {
+        const abs = join(cur, dirent.name);
+        const rel = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
+        // isDirectory()/isSymbolicLink() come from readdir's own lstat, so a symlink to a
+        // directory is a symlink here, not a directory — it's recorded, not descended into.
+        if (dirent.isDirectory()) {
+          await walk(abs, rel);
+          return;
+        }
+        const st = await lstat(abs, { bigint: true });
+        manifest.set(rel, {
+          size: st.size,
+          mtimeNs: st.mtimeNs,
+          ino: st.ino,
+          isSymlink: dirent.isSymbolicLink(),
+        });
+      }),
+    );
   };
   await walk(dir, '');
   return manifest;

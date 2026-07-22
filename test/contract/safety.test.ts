@@ -12,6 +12,13 @@ import {
   type TestServer,
 } from '../helpers.js';
 
+/** The refusal must roll the local checkout back too, not just leave the remote alone. */
+async function expectRolledBack(fx: Fixture, preRemote: string, preHead: string): Promise<void> {
+  expect(await fx.bareHead()).toBe(preRemote);
+  expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+}
+
 describe('transaction safety', () => {
   let fx: Fixture;
   let srv: TestServer | undefined;
@@ -38,10 +45,7 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('conflict marker');
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('a .markdown write containing conflict markers is rejected and rolled back', async () => {
@@ -58,10 +62,7 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('conflict marker');
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('a mixed-case .MD write containing conflict markers is rejected and rolled back', async () => {
@@ -80,10 +81,7 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('conflict marker');
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('a note in a brand-new folder is still content-validated, not waved through', async () => {
@@ -102,10 +100,7 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('conflict marker');
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('broken frontmatter YAML never reaches the remote', async () => {
@@ -121,10 +116,7 @@ describe('transaction safety', () => {
     // is only that nothing lands.
     expect(res.isError).toBe(true);
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('a non-conflicting concurrent push is absorbed by bounded retry', async () => {
@@ -251,10 +243,7 @@ describe('transaction safety', () => {
     });
     expect(res.isError).toBe(true);
 
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('a push whose ACK is lost but which landed is treated as success', async () => {
@@ -403,8 +392,6 @@ describe('transaction safety', () => {
     expect(textOf(res).toLowerCase()).toContain('gitignore');
 
     expect(existsSync(join(fx.serverDir, 'private', 'notes.md'))).toBe(false);
-    expect(await fx.bareHead()).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
   });
 });

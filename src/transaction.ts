@@ -252,7 +252,7 @@ export class Transactor {
         lstat(join(this.cfg.vaultPath, relPath)).catch(() => undefined),
       ),
     );
-    const hash = createHash('sha1');
+    const hash = createHash('sha256');
     for (const [index, relPath] of sorted.entries()) {
       hash.update(relPath).update('\0');
       const stat = stats[index];
@@ -366,6 +366,11 @@ export class Transactor {
         await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
         this.lastFetchAt = Date.now();
         await this.git(['merge', '--ff-only', this.target()]);
+        // Same guard reconcileAtStartup and readTransaction run before serving anything
+        // from HEAD: this fetch/merge can land a note carrying executable frontmatter, and
+        // mutate() below is about to hand delegated tools a clone of this very HEAD, whose
+        // readNote() parses frontmatter through gray-matter's default (unsafe) engines.
+        await this.refuseUnvalidatedFetchedNotes();
         rollbackTo = await this.git(['rev-parse', 'HEAD']);
         const ignoredBefore = await this.ignoredFiles();
         const ignoredBeforeFingerprint = await this.ignoredFingerprint(ignoredBefore);

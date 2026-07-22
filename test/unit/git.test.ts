@@ -20,10 +20,11 @@ describe('GitError credential redaction', () => {
     // message can reach MCP tool responses, so a remote URL's user:token must never
     // survive in any of the three places a consumer might log.
     const url = 'https://user:sekret@example.invalid/repo.git';
-    const err = new GitError(`git fetch ${url} failed: fatal: unable to access '${url}'`, [
-      'fetch',
-      url,
-    ], `fatal: unable to access '${url}': could not resolve host`);
+    const err = new GitError(
+      `git fetch ${url} failed: fatal: unable to access '${url}'`,
+      ['fetch', url],
+      `fatal: unable to access '${url}': could not resolve host`,
+    );
     for (const surface of [err.message, err.stderr, err.args.join(' ')]) {
       expect(surface).not.toContain('sekret');
       expect(surface).toContain('://***@');

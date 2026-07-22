@@ -428,12 +428,12 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
           version: VERSION,
         });
         const [stageClientTransport, stageServerTransport] = InMemoryTransport.createLinkedPair();
-        await stageServer.connect(stageServerTransport);
         const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
-        await stageClient.connect(stageClientTransport);
         let callError: unknown;
         let closes: PromiseSettledResult<void>[] = [];
         try {
+          await stageServer.connect(stageServerTransport);
+          await stageClient.connect(stageClientTransport);
           result = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
         } catch (err) {
           callError = err;
