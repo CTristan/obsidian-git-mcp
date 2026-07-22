@@ -1,9 +1,24 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyCloneDiff, type Manifest } from '../../src/staging.js';
+import {
+  applyCloneDiff,
+  COPY_CHUNK_SIZE,
+  manifestOf,
+  type Manifest,
+} from '../../src/staging.js';
 
 describe('applyCloneDiff symlink safety', () => {
   let root: string;
@@ -97,5 +112,85 @@ describe('applyCloneDiff symlink safety', () => {
     await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
 
     expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
+  });
+});
+
+describe('manifestOf nested tree', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'ogm-manifest-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('fingerprints files and symlinks across a nested tree without descending links', async () => {
+    // Regular files at the top level and one directory deep, plus a symlink to a directory and
+    // a symlink to a file. The walk must record every file and every link, skip directories
+    // themselves, and record a symlinked directory as a link rather than descending into it.
+    await writeFile(join(root, 'a.md'), 'top\n');
+    await mkdir(join(root, 'sub'));
+    await writeFile(join(root, 'sub', 'b.md'), 'nested-b\n');
+    await writeFile(join(root, 'sub', 'c.md'), 'nested-c\n');
+    await symlink(join(root, 'sub'), join(root, 'dirlink'));
+    await symlink(join(root, 'a.md'), join(root, 'filelink'));
+
+    const manifest = await manifestOf(root);
+
+    expect(new Set(manifest.keys())).toEqual(
+      new Set(['a.md', 'sub/b.md', 'sub/c.md', 'dirlink', 'filelink']),
+    );
+    // Directories are traversed but never recorded, and a symlinked directory is not descended.
+    expect(manifest.has('sub')).toBe(false);
+    expect(manifest.has('dirlink/b.md')).toBe(false);
+
+    expect(manifest.get('a.md')?.isSymlink).toBe(false);
+    expect(manifest.get('sub/b.md')?.isSymlink).toBe(false);
+    expect(manifest.get('dirlink')?.isSymlink).toBe(true);
+    expect(manifest.get('filelink')?.isSymlink).toBe(true);
+    expect(manifest.get('a.md')?.size).toBe(4n);
+  });
+});
+
+describe('applyCloneDiff copy-back streaming', () => {
+  let root: string;
+  let vaultPath: string;
+  let cloneDir: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'ogm-stream-'));
+    vaultPath = join(root, 'vault');
+    cloneDir = join(root, 'clone');
+    await mkdir(vaultPath);
+    await mkdir(cloneDir);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('round-trips a multi-chunk attachment byte-identically', async () => {
+    // Larger than one COPY_CHUNK_SIZE slice with a non-aligned remainder, so the chunked read/
+    // write loop spans several full chunks plus a partial tail. Random bytes make any dropped,
+    // duplicated, or misplaced chunk corrupt the round-trip rather than pass by coincidence.
+    const payload = randomBytes(COPY_CHUNK_SIZE * 2 + 7);
+    await mkdir(join(cloneDir, 'attachments'));
+    await writeFile(join(cloneDir, 'attachments', 'big.bin'), payload);
+
+    const before: Manifest = new Map();
+    const after: Manifest = new Map([
+      [
+        'attachments/big.bin',
+        { size: BigInt(payload.length), mtimeNs: 1n, ino: 1n, isSymlink: false },
+      ],
+    ]);
+
+    await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
+
+    const written = await readFile(join(vaultPath, 'attachments', 'big.bin'));
+    expect(written.length).toBe(payload.length);
+    expect(Buffer.compare(written, payload)).toBe(0);
   });
 });

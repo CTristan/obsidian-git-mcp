@@ -10,8 +10,11 @@ const HEADING = /^ {0,3}(#{1,6})(?:\s+(.+?))?(?:\s+#+)?\s*$/;
 // A fence marker may be indented 0-3 spaces per CommonMark; 4+ spaces (or any leading
 // tab) is an indented code block, not a fence, so we match the raw line and cap the
 // leading run at three spaces rather than trimming — trimming would let "    ```" or a
-// tab-indented "\t```" wrongly open a fence and mask every later real heading.
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+// tab-indented "\t```" wrongly open a fence and mask every later real heading. The
+// trailing capture is the rest of the line after the marker run: for an opener it's the
+// info string (a backtick in a backtick-fence info string voids the opener), and for a
+// closer it must be whitespace-only.
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 // A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
 // line inside a ``` example); both scans below need to ignore those, so this returns,
@@ -37,18 +40,24 @@ function fenceMask(
     const m = FENCE.exec(line);
     if (m) {
       const marker = m[1]!;
+      const suffix = m[2]!;
       if (!inFence) {
-        inFence = true;
-        fenceChar = marker[0]!;
-        fenceLen = marker.length;
-        openFenceAt = i;
+        // A backtick fence whose info string contains a backtick is not a valid opener
+        // per CommonMark — otherwise inline code like "```foo`bar`" would masquerade as
+        // a fence and mask every real heading below it. Tilde fences carry no such
+        // restriction, so their info string may hold backticks.
+        if (marker[0] !== '`' || !suffix.includes('`')) {
+          inFence = true;
+          fenceChar = marker[0]!;
+          fenceLen = marker.length;
+          openFenceAt = i;
+        }
       } else if (
         marker[0] === fenceChar &&
         marker.length >= fenceLen &&
         // A closing fence marker may be followed only by whitespace (CommonMark) — a
-        // trailing info string like "``` not-a-close" leaves the fence open. m[0] spans
-        // the leading indent plus the marker, so slice the raw line from there.
-        line.slice(m[0].length).trim() === ''
+        // trailing info string like "``` not-a-close" leaves the fence open.
+        suffix.trim() === ''
       ) {
         inFence = false;
       }
@@ -98,6 +107,14 @@ export function appendToSection(content: string, heading: string, text: string):
   }
 
   if (start === -1) {
+    if (endsOpen) {
+      // The note ends inside a fence that never closes, so appending a new heading here
+      // would splice it (and its text) into code-block content and silently corrupt the
+      // note. Refuse rather than write structure that renders as code.
+      throw new Error(
+        'refusing to create a new section — the note ends inside an unclosed code fence, so the heading would become code-block content',
+      );
+    }
     const eol = useCRLF ? '\r\n' : '\n';
     const trimmed = content.replace(/[\r\n]+$/, '');
     const body = text.split('\n').map((l) => l.replace(/\r$/, '')).join(eol);

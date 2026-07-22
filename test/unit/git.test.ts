@@ -42,3 +42,38 @@ describe('GitError credential redaction', () => {
     expect((err as GitError).message).not.toContain('sekret');
   });
 });
+
+describe('runGit timeout', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ogm-git-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('uses the default 30s ceiling when no timeoutMs is given', async () => {
+    // `--version` never touches the network or the working tree, so the default
+    // timeout is irrelevant to whether it succeeds — this just proves the
+    // no-options path still works once GitOptions grew a second field.
+    const out = await runGit(['--version'], dir);
+    expect(out).toContain('git version');
+  });
+
+  it('honors a caller-supplied timeoutMs instead of the hardcoded 30s', async () => {
+    // `hash-object --stdin` blocks reading from stdin forever unless killed — it
+    // never completes on its own, so there is no race between "the command
+    // finished" and "the timeout fired" to make this flaky. Before the fix,
+    // GitOptions had no timeoutMs field and this would hang for the full 30s.
+    const start = Date.now();
+    const err: unknown = await runGit(['hash-object', '--stdin'], dir, {
+      timeoutMs: 200,
+    }).catch((e: unknown) => e);
+    const elapsed = Date.now() - start;
+
+    expect(err).toBeInstanceOf(GitError);
+    expect(elapsed).toBeLessThan(15_000);
+  });
+});

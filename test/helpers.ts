@@ -1,8 +1,9 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { expect } from 'vitest';
 import { createVaultServer, type VaultServerConfig } from '../src/index.js';
-import type { Fixture } from './fixture.js';
+import { git, type Fixture } from './fixture.js';
 
 export interface TestServer {
   client: Client;
@@ -72,4 +73,11 @@ export function commitShaOf(result: CallToolResult): string {
 
 export function headShaOf(result: CallToolResult): string {
   return String((result._meta ?? {})['headSha'] ?? '');
+}
+
+/** The refusal must roll the local checkout back too, not just leave the remote alone. */
+export async function expectRolledBack(fx: Fixture, preRemote: string, preHead: string): Promise<void> {
+  expect(await fx.bareHead()).toBe(preRemote);
+  expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
 }

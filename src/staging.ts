@@ -7,7 +7,6 @@ import {
   mkdtemp,
   open,
   readdir,
-  readFile,
   realpath,
   stat,
   unlink,
@@ -31,6 +30,15 @@ export interface ManifestEntry {
 
 /** Every file/symlink under a staged clone, keyed by clone-relative path. */
 export type Manifest = Map<string, ManifestEntry>;
+
+/**
+ * Cap on how many of one directory's entries manifestOf lstats at once. A flat attachments
+ * folder with years of pasted images is a real vault shape, and an uncapped Promise.all over
+ * it would fire thousands of concurrent lstat calls — nested walk recursion stacking still
+ * more on top — which starves libuv's threadpool and hits EMFILE instead of scaling. 64 keeps
+ * the parallelism win while bounding the outstanding fd/threadpool load.
+ */
+const DIR_CONCURRENCY = 64;
 
 /**
  * Clone the vault worktree into an ephemeral 0700 dir so a delegated write mutates a
@@ -72,48 +80,85 @@ export async function manifestOf(dir: string): Promise<Manifest> {
   const manifest: Manifest = new Map();
   const walk = async (cur: string, prefix: string): Promise<void> => {
     const dirents = await readdir(cur, { withFileTypes: true });
-    // Every entry's lstat (or recursive walk) is independent of every other's, so batch
-    // the whole directory through Promise.all instead of awaiting one entry at a time —
-    // otherwise scan latency scales linearly with the vault's total file count.
-    await Promise.all(
-      dirents.map(async (dirent) => {
-        const abs = join(cur, dirent.name);
-        const rel = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
-        // isDirectory()/isSymbolicLink() come from readdir's own lstat, so a symlink to a
-        // directory is a symlink here, not a directory — it's recorded, not descended into.
-        if (dirent.isDirectory()) {
-          await walk(abs, rel);
-          return;
-        }
-        const st = await lstat(abs, { bigint: true });
-        manifest.set(rel, {
-          size: st.size,
-          mtimeNs: st.mtimeNs,
-          ino: st.ino,
-          isSymlink: dirent.isSymbolicLink(),
-        });
-      }),
-    );
+    // Every entry's lstat (or recursive walk) is independent of every other's, so batch them
+    // through Promise.all instead of awaiting one at a time — otherwise scan latency scales
+    // linearly with the vault's file count. Slice into DIR_CONCURRENCY-sized waves so a huge
+    // flat directory can't fan out into thousands of simultaneous lstats.
+    for (let i = 0; i < dirents.length; i += DIR_CONCURRENCY) {
+      await Promise.all(
+        dirents.slice(i, i + DIR_CONCURRENCY).map(async (dirent) => {
+          const abs = join(cur, dirent.name);
+          const rel = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
+          // isDirectory()/isSymbolicLink() come from readdir's own lstat, so a symlink to a
+          // directory is a symlink here, not a directory — it's recorded, not descended into.
+          if (dirent.isDirectory()) {
+            await walk(abs, rel);
+            return;
+          }
+          const st = await lstat(abs, { bigint: true });
+          manifest.set(rel, {
+            size: st.size,
+            mtimeNs: st.mtimeNs,
+            ino: st.ino,
+            isSymlink: dirent.isSymbolicLink(),
+          });
+        }),
+      );
+    }
   };
   await walk(dir, '');
   return manifest;
 }
 
 /**
- * Write every byte of `bytes` at absolute offset 0 of an already-open, already-truncated
- * handle, looping until nothing remains. A single FileHandle.write can report a short
- * write on a regular file, which — because callers truncate first — would otherwise leave
- * a note holding only a prefix of its intended content. Passing an explicit position each
- * pass keeps the write independent of the handle's own offset.
+ * Write every byte of `bytes` at absolute file offset `filePosition` (default 0) of an
+ * already-open handle, looping until nothing remains. A single FileHandle.write can report a
+ * short write on a regular file, which — because callers truncate first — would otherwise
+ * leave a note holding only a prefix of its intended content. Passing an explicit position
+ * each pass keeps the write independent of the handle's own offset, which also lets a chunked
+ * copy place successive buffers at their own file positions.
  */
-export async function writeAllAt(handle: FileHandle, bytes: Buffer): Promise<void> {
+export async function writeAllAt(
+  handle: FileHandle,
+  bytes: Buffer,
+  filePosition = 0,
+): Promise<void> {
   let offset = 0;
   while (offset < bytes.length) {
-    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, offset);
+    const { bytesWritten } = await handle.write(
+      bytes,
+      offset,
+      bytes.length - offset,
+      filePosition + offset,
+    );
     if (bytesWritten === 0) {
       throw new Error('write made no progress');
     }
     offset += bytesWritten;
+  }
+}
+
+/**
+ * Chunk size for the streaming clone→vault copy-back. Obsidian vaults hold large binary
+ * attachments (images, PDFs, video); reading one in fixed 64 KiB slices keeps a multi-GB file
+ * from ever landing in memory whole.
+ */
+export const COPY_CHUNK_SIZE = 64 * 1024;
+
+/**
+ * Copy `source` into `dest` in COPY_CHUNK_SIZE slices, reusing one buffer and driving both
+ * sides with explicit positions so nothing depends on either handle's own offset. `dest` must
+ * already be truncated and pinned — this only moves bytes, never opens or resolves a path — so
+ * it inherits writeIntoVault's pinning guarantee unchanged.
+ */
+async function streamCopy(source: FileHandle, dest: FileHandle): Promise<void> {
+  const buffer = Buffer.allocUnsafe(COPY_CHUNK_SIZE);
+  let position = 0;
+  for (;;) {
+    const { bytesRead } = await source.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+    await writeAllAt(dest, buffer.subarray(0, bytesRead), position);
+    position += bytesRead;
   }
 }
 
@@ -222,7 +267,6 @@ async function writeIntoVault(
   cloneDir: string,
   rel: string,
 ): Promise<void> {
-  const bytes = await readFile(join(cloneDir, rel));
   const target = join(vaultPath, rel);
   await mkdirNoFollow(vaultPath, rel);
   const handle = await openPinnedHandle(
@@ -233,9 +277,16 @@ async function writeIntoVault(
     (message) => new Error(`${rel}: ${message}`),
   );
   try {
-    // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
-    await handle.truncate(0);
-    await writeAllAt(handle, bytes);
+    // The vault handle is pinned before any bytes move; the clone read only opens after, and
+    // applyCloneDiff already refused any symlink in the diff, so rel is a plain file here.
+    const source = await open(join(cloneDir, rel), constants.O_RDONLY);
+    try {
+      // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
+      await handle.truncate(0);
+      await streamCopy(source, handle);
+    } finally {
+      await source.close();
+    }
   } finally {
     await handle.close();
   }

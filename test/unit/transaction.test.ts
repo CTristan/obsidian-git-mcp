@@ -192,4 +192,67 @@ describe('Transactor ignored-file change signal', () => {
     expect(existsSync(ignoredPath)).toBe(false);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });
+
+  it('removes a newly-ignored path that validateChangedFile itself refuses, not just the generic HiddenIgnoredWriteError case', async () => {
+    // validateChangedFile throwing for a newly-ignored path (the mechanism that refuses
+    // e.g. .obsidian/ writes by name) jumps straight past the unlink loop that normally
+    // runs right before the generic HiddenIgnoredWriteError throw — reset --hard and
+    // clean -fd can never remove a gitignored path, so without cleanup in the catch block
+    // itself, the refused file is a permanent orphan on disk.
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+    await git(['fetch', 'origin', 'main'], fx.serverDir);
+    await git(['merge', '--ff-only', 'origin/main'], fx.serverDir);
+
+    const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
+    const transactor = makeTransactor(fx, {
+      validateChangedFile: async (relPath) => {
+        if (relPath === 'private/notes.md') {
+          throw new Error('refusing private/notes.md by name');
+        }
+      },
+    });
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+
+    const err: unknown = await transactor
+      .transact('creates a newly-ignored, by-name-refused file', async () => {
+        await mkdir(join(fx.serverDir, 'private'), { recursive: true });
+        await writeFile(ignoredPath, '# Private\n');
+      })
+      .catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe('refusing private/notes.md by name');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    expect(existsSync(ignoredPath)).toBe(false);
+  });
+});
+
+describe('Transactor.changedPaths rename parsing', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('parses a staged rename record as the target path only, not a mis-sliced orig-path fragment', async () => {
+    // git status --porcelain=v1 -z pairs a rename/copy record across two NUL-separated
+    // segments — the target path first, then a bare orig path with no "XY " status
+    // prefix. Slicing every segment by a fixed 3-character offset mis-parses that bare
+    // orig-path segment into a bogus "changed path" entry.
+    await writeFile(
+      join(fx.serverDir, 'Inbox', 'RenameSource.md'),
+      '# Source\n\nSome body text.\n',
+    );
+    await git(['add', '-A'], fx.serverDir);
+    await git(['commit', '-m', 'add rename source'], fx.serverDir);
+    await git(['mv', 'Inbox/RenameSource.md', 'Inbox/RenameTarget.md'], fx.serverDir);
+
+    const transactor = makeTransactor(fx);
+    const changed = await transactor['changedPaths']();
+
+    expect(changed).toEqual(['Inbox/RenameTarget.md']);
+  });
 });

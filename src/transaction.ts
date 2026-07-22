@@ -189,11 +189,15 @@ export class Transactor {
   }
 
   private async changedPaths(): Promise<string[]> {
-    // -z gives NUL-separated, unquoted paths. Unstaged changes never show as renames,
-    // so every entry is a bare "XY path" record. --untracked-files=all is load-bearing:
+    // -z gives NUL-separated, unquoted paths. --untracked-files=all is load-bearing:
     // without it git collapses a new note's new parent directory to "NewFolder/", so
     // validateChangedFile would see a directory instead of the note and skip its content
     // checks — a delegated write to a fresh folder would then commit unvalidated.
+    // A rename or copy record (status code containing 'R' or 'C') is split across two
+    // NUL-separated segments in -z output: the target path first, then a bare orig path
+    // with no "XY " status prefix — git-status(1) calls this "the field order is
+    // reversed" versus the space-separated format. That orig-path segment must be
+    // consumed as the record's pair, not sliced as its own bogus entry.
     const out = await this.git([
       '--no-optional-locks',
       'status',
@@ -201,10 +205,21 @@ export class Transactor {
       '--untracked-files=all',
       '-z',
     ]);
-    return out
-      .split('\0')
-      .filter((entry) => entry.length > 3)
-      .map((entry) => entry.slice(3));
+    // length > 0, not > 3: a paired orig-path continuation segment has no "XY " prefix,
+    // so a short filename there (1-3 chars) would otherwise be dropped and desync the
+    // pairing below. Every non-paired record is always >= 4 chars ("XY " plus a filename
+    // character), so this admits nothing a stricter filter wouldn't already have kept.
+    const entries = out.split('\0').filter((entry) => entry.length > 0);
+    const paths: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      const status = entry.slice(0, 2);
+      paths.push(entry.slice(3));
+      if (status.includes('R') || status.includes('C')) {
+        i++; // skip the paired orig-path segment
+      }
+    }
+    return paths;
   }
 
   /**
@@ -357,6 +372,10 @@ export class Transactor {
       // because unlinking a foreign process's lockfile would let two writers interleave.
       await this.acquireLock();
       let rollbackTo: string | undefined;
+      // Populated once mutate() finishes; the catch block below unlinks these regardless
+      // of why the transaction failed, because reset --hard + clean -fd can never touch a
+      // gitignored path (git ls-files --ignored is the only thing that can see one).
+      let newlyIgnoredPaths: string[] = [];
       try {
         if (await this.isDirty()) {
           throw new DirtyCheckoutError(
@@ -379,29 +398,27 @@ export class Transactor {
 
         const changed = await this.changedPaths();
         const ignoredBeforeSet = new Set(ignoredBefore);
-        const newlyIgnored = (await this.ignoredFiles()).filter(
+        newlyIgnoredPaths = (await this.ignoredFiles()).filter(
           (path) => !ignoredBeforeSet.has(path),
         );
 
         // Validate each newly-ignored path first, because a .obsidian/.git write must keep
         // its specific by-name refusal — that guard throws before the generic ignored-write
-        // refusal below collapses every remaining case into one message.
-        for (const relPath of newlyIgnored) {
+        // refusal below collapses every remaining case into one message. Either throw lands
+        // in the catch block below, which unlinks newlyIgnoredPaths itself — a newlyIgnored
+        // path did not exist as an ignored file pre-transaction, so removing it there is
+        // always safe, and a tracked-then-recreated one is restored by the catch's reset
+        // --hard regardless.
+        for (const relPath of newlyIgnoredPaths) {
           await this.cfg.validateChangedFile(relPath);
         }
-        if (newlyIgnored.length > 0) {
+        if (newlyIgnoredPaths.length > 0) {
           // git can neither stage nor commit a gitignored path, so this write cannot land —
           // we refuse the whole transaction even when tracked changes sit alongside, because
           // committing those would silently drop the ignored write and leave it on disk
-          // (rollback's clean -fd never removes an ignored file). Unlink each first; that's
-          // safe because a newlyIgnored path did not exist as an ignored file pre-transaction,
-          // and a tracked-then-recreated one is restored by the catch block's reset --hard.
-          // ls-files --ignored lists files, never directories, so unlink is the right removal.
-          for (const relPath of newlyIgnored) {
-            await unlink(join(this.cfg.vaultPath, relPath)).catch(() => {});
-          }
+          // (rollback's clean -fd never removes an ignored file).
           throw new HiddenIgnoredWriteError(
-            `the mutation created gitignored path(s) [${newlyIgnored.join(', ')}] that git ` +
+            `the mutation created gitignored path(s) [${newlyIgnoredPaths.join(', ')}] that git ` +
               'can neither stage nor commit; refusing the write',
           );
         }
@@ -435,6 +452,11 @@ export class Transactor {
           await this.git(['rebase', '--abort']).catch(() => {});
           await this.git(['reset', '--hard', rollbackTo]).catch(() => {});
           await this.git(['clean', '-fd']).catch(() => {});
+        }
+        // ls-files --ignored lists files, never directories, so unlink is the right
+        // removal for every entry here.
+        for (const relPath of newlyIgnoredPaths) {
+          await unlink(join(this.cfg.vaultPath, relPath)).catch(() => {});
         }
         throw err;
       } finally {

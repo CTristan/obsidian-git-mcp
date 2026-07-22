@@ -6,18 +6,12 @@ import { createFixture, git, type Fixture } from '../fixture.js';
 import {
   callTool,
   commitShaOf,
+  expectRolledBack,
   headShaOf,
   startServer,
   textOf,
   type TestServer,
 } from '../helpers.js';
-
-/** The refusal must roll the local checkout back too, not just leave the remote alone. */
-async function expectRolledBack(fx: Fixture, preRemote: string, preHead: string): Promise<void> {
-  expect(await fx.bareHead()).toBe(preRemote);
-  expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
-  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-}
 
 describe('transaction safety', () => {
   let fx: Fixture;

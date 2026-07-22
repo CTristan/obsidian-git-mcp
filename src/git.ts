@@ -30,6 +30,7 @@ export class GitError extends Error {
 
 export interface GitOptions {
   env?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 /**
@@ -47,7 +48,7 @@ export async function runGit(
       cwd,
       // GIT_TERMINAL_PROMPT last so no caller can re-enable interactive prompts.
       env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: '0' },
-      timeout: 30_000,
+      timeout: options.timeoutMs ?? 30_000,
       maxBuffer: 16 * 1024 * 1024,
     });
     return stdout.replace(/\n$/, '');

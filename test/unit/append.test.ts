@@ -376,4 +376,150 @@ describe('appendToSection', () => {
     ].join('\n');
     expect(appendToSection(note, 'Log', '- added')).toBe(expected);
   });
+
+  it('does not open a backtick fence whose info string contains a backtick', () => {
+    // Per CommonMark a backtick-fence info string may not contain a backtick, so
+    // "```foo`bar" is inline code, not a fence opener. Opening one here would mask the
+    // real "## Log" heading below and force a duplicate section at the end of the note.
+    const note = ['# T', '', '```foo`bar', '', '## Log', '', '- one', ''].join('\n');
+    const expected = ['# T', '', '```foo`bar', '', '## Log', '', '- one', '- two', ''].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('opens a backtick fence whose info string is a bare language tag', () => {
+    // A backtick-fence info string without a backtick (a language tag like "js") is a
+    // valid opener — the restriction is on backticks, not on non-empty info strings — so
+    // the "## Fake" line inside must stay masked instead of ending the "Log" section.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```js',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```js',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('opens a tilde fence whose info string contains a backtick', () => {
+    // The backtick-in-info-string restriction is asymmetric: only backtick fences carry
+    // it, so a tilde fence like "~~~foo`bar" still opens normally and the "## Fake" line
+    // it wraps stays masked. Guards against a fix that over-restricts tilde fences too.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '~~~foo`bar',
+      '## Fake',
+      '~~~',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '~~~foo`bar',
+      '## Fake',
+      '~~~',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('does not close a fence when the marker line trailing text contains backticks', () => {
+    // A closing fence may be followed only by whitespace, so "``` `not`close" — trailing
+    // text that itself contains backticks — does not close the fence. The "## Fake" line
+    // after it stays masked instead of ending the "Log" section early.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '``` `not`close',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '``` `not`close',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('refuses to create a missing section when the note ends inside an unclosed fence', () => {
+    // The document ends inside a fence that never closes, so a new "## Log" heading (and
+    // its appended text) would land as code-block content and silently corrupt the note.
+    // Refuse instead of appending into the open fence.
+    const note = ['# T', '', '## Notes', '', '```', 'code line', ''].join('\n');
+    expect(() => appendToSection(note, 'Log', '- added')).toThrow(/unclosed code fence/);
+  });
+
+  it('still creates a missing section when the note fences are all closed', () => {
+    // The unclosed-fence refusal must not fire when the fence closes — the note has no
+    // "Log" section but its code block is terminated, so the section is created at the end.
+    const note = ['# T', '', '## Notes', '', '```', 'code line', '```', ''].join('\n');
+    expect(appendToSection(note, 'Log', '- added')).toBe(`${note}\n## Log\n\n- added\n`);
+  });
 });
