@@ -28,6 +28,20 @@ async function commitSymlink(
   await git(['push', 'origin', 'main'], fx.collabDir);
 }
 
+/** Commits a chain of symlinks (each hop's target becomes the next hop's name) in one push. */
+async function commitSymlinkChain(
+  fx: Fixture,
+  links: ReadonlyArray<readonly [linkName: string, target: string]>,
+  message: string,
+): Promise<void> {
+  for (const [linkName, target] of links) {
+    await symlink(target, join(fx.collabDir, linkName));
+  }
+  await git(['add', '-A'], fx.collabDir);
+  await git(['commit', '-m', message], fx.collabDir);
+  await git(['push', 'origin', 'main'], fx.collabDir);
+}
+
 describe('security', () => {
   let fx: Fixture;
   let srv: TestServer;
@@ -140,6 +154,101 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.serverDir, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    await expectCleanWorkingTree(fx);
+  });
+
+  it('write_note is refused when a committed symlink resolves entirely outside the vault', async () => {
+    // Defense-in-depth, not fix-dependent: MCPVault's own resolvePath already refuses an
+    // EXISTING out-of-vault target on its own (realpathSync succeeds and the result sits
+    // outside the vault), so this test passes with or without this wrapper's own guard.
+    // The dangling-target and symlink-chain cases below are the ones that actually
+    // depend on it — resolvePath can't realpath a target that doesn't exist yet, and a
+    // resolver that stops after one hop misses a chain whose first hop still looks
+    // in-vault.
+    const target = join(fx.outsideDir, 'existing.md');
+    const before = '# Existing\n\noriginal content\n';
+    await writeFile(target, before);
+    await commitSymlink(fx, 'Linked.md', target, 'collab: add symlink to outside target');
+
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Linked.md',
+      content: 'pwned\n',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe(before);
+    await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanWorkingTree(fx);
+  });
+
+  it('patch_note is refused when a committed symlink resolves entirely outside the vault', async () => {
+    // Same forwardWrite preflight as the write_note case above, exercised through
+    // patch_note's oldString/newString shape instead of write_note's content — the guard
+    // fires before MCPVault ever reads the target to apply the patch.
+    const target = join(fx.outsideDir, 'existing-patch.md');
+    const before = '# Existing\n\noriginal content\n';
+    await writeFile(target, before);
+    await commitSymlink(fx, 'Linked.md', target, 'collab: add symlink to outside target');
+
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'patch_note', {
+      path: 'Linked.md',
+      oldString: 'original content',
+      newString: 'pwned',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe(before);
+    await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanWorkingTree(fx);
+  });
+
+  it('write_note is refused when a 2-hop symlink chain resolves outside the vault', async () => {
+    // resolveWriteDestination used to follow ONE hop only: Hop1.md -> Hop2.md still
+    // resolves in-vault at that point, so the single-hop guard approved it — only for
+    // Hop2.md to itself be a symlink onto a dangling external target, which write_note's
+    // actual filesystem write then followed and created. The guard has to walk the full
+    // chain, not just the first link.
+    const externalTarget = join(fx.outsideDir, 'exfil.md');
+    await commitSymlinkChain(
+      fx,
+      [
+        ['Hop1.md', 'Hop2.md'],
+        ['Hop2.md', externalTarget],
+      ],
+      'collab: add 2-hop symlink chain escaping the vault',
+    );
+
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Hop1.md',
+      content: 'PWNED',
+    });
+    expect(res.isError).toBe(true);
+    expect(existsSync(externalTarget)).toBe(false);
+    await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanWorkingTree(fx);
+  });
+
+  it('write_note is refused when a 2-hop symlink chain resolves into .git', async () => {
+    // Same chain shape as above, but the second hop lands inside the checkout's own
+    // .git — a single-hop guard sees only "Hop1.md -> Hop2.md" (unremarkable) and
+    // approves it, letting the actual write follow Hop2.md into .git/config.
+    await commitSymlinkChain(
+      fx,
+      [
+        ['Hop1.md', 'Hop2.md'],
+        ['Hop2.md', '.git/config'],
+      ],
+      'collab: add 2-hop symlink chain into .git',
+    );
+
+    const before = await readFile(join(fx.serverDir, '.git', 'config'), 'utf8');
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Hop1.md',
+      content: 'PWNED',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(join(fx.serverDir, '.git', 'config'), 'utf8')).toBe(before);
     await expectCleanWorkingTree(fx);
   });
 

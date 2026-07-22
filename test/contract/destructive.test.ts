@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
 import { callTool, startServer, textOf, type TestServer } from '../helpers.js';
@@ -53,5 +56,82 @@ describe('destructive tools', () => {
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
+  it('delete_note through a symlink is refused without deleting the external target', async () => {
+    // unlink() on a symlink removes the link itself, never its target, so the exposure
+    // here isn't the external file's content — it's that the delete would otherwise
+    // succeed and commit/push the symlink's removal without ever being flagged as the
+    // escape it is.
+    const target = join(fx.outsideDir, 'precious.md');
+    const before = '# Precious\n\ndo not delete\n';
+    await writeFile(target, before);
+    await symlink(target, join(fx.collabDir, 'Linked.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add symlink to outside target'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    srv = await startServer(fx, { allowDestructive: true });
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'delete_note', {
+      path: 'Linked.md',
+      confirmPath: 'Linked.md',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe(before);
+    expect(await fx.bareHead()).toBe(preRemote);
+  });
+
+  it('move_note through a symlink is refused without copying the external target into the vault', async () => {
+    // moveNote reads through the symlink (following it, unlike unlink) and writes that
+    // content to newPath inside the vault — an exfiltration path, not just a corruption
+    // one, so this must be refused before MCPVault ever reads the external file.
+    const target = join(fx.outsideDir, 'secret.md');
+    const before = '# Secret\n\nexternal content\n';
+    await writeFile(target, before);
+    await symlink(target, join(fx.collabDir, 'Linked.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add symlink to outside target'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    srv = await startServer(fx, { allowDestructive: true });
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'move_note', {
+      oldPath: 'Linked.md',
+      newPath: 'Exfiltrated.md',
+    });
+    expect(res.isError).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe(before);
+    expect(await fx.bareHead()).toBe(preRemote);
+  });
+
+  it('move_note is refused when newPath is a 2-hop symlink chain resolving outside the vault', async () => {
+    // Chained version of the single-hop test above: newPath's first hop still resolves
+    // in-vault, so a resolver that stops after one readlink() approves it — only for the
+    // second hop to point at a dangling external target that moveNote's writeFile then
+    // followed. overwrite:true is required because the chain's first link ("Hop1.md")
+    // already exists on disk as a symlink, so MCPVault's own exclusive-write check would
+    // otherwise refuse the call for an unrelated reason before our guard is exercised.
+    // A real in-vault note as oldPath lets the test assert it survives untouched — with
+    // the bug, moveNote would have deleted it after "successfully" relocating its
+    // content to the external target.
+    const externalTarget = join(fx.outsideDir, 'exfil.md');
+    await symlink('Hop2.md', join(fx.collabDir, 'Hop1.md'));
+    await symlink(externalTarget, join(fx.collabDir, 'Hop2.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add 2-hop symlink chain escaping the vault'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    srv = await startServer(fx, { allowDestructive: true });
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'move_note', {
+      oldPath: 'Inbox/Beta.md',
+      newPath: 'Hop1.md',
+      overwrite: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(existsSync(externalTarget)).toBe(false);
+    expect(await git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).toContain('squirrels');
+    expect(await fx.bareHead()).toBe(preRemote);
   });
 });

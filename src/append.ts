@@ -1,6 +1,19 @@
 // The optional trailing group strips a closed-ATX marker ("## Log ##"), which needs
 // whitespace before it — a bare trailing # ("## C#") is part of the name.
 const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
+const FENCE = /^(`{3,}|~{3,})/;
+
+// A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
+// line inside a ``` example); both scans below need to ignore those, so this returns,
+// per line, whether it sits inside an (unclosed) fence.
+function fenceMask(lines: readonly string[]): boolean[] {
+  let inFence = false;
+  return lines.map((line) => {
+    const wasFenced = inFence;
+    if (FENCE.test(line.trim())) inFence = !inFence;
+    return wasFenced;
+  });
+}
 
 /**
  * Append text at the end of the named section. The section runs from its heading to the
@@ -11,17 +24,23 @@ const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
  */
 export function appendToSection(content: string, heading: string, text: string): string {
   const wanted = heading.trim();
-  if (wanted === '' || /[\r\n]/.test(wanted)) {
+  if (
+    wanted === '' ||
+    /[\r\n]/.test(wanted) ||
+    HEADING.exec(`## ${wanted}`)?.[2] !== wanted
+  ) {
     throw new Error('heading must be a non-empty single line');
   }
   // Match the note's existing line-ending style, because splicing LF lines into a CRLF
   // note would leave it mixed.
   const useCRLF = content.includes('\r\n');
   const lines = content.split('\n');
+  const fenced = fenceMask(lines);
 
   let start = -1;
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
+    if (fenced[i]) continue;
     const m = HEADING.exec(lines[i]!);
     if (m && m[2] === wanted) {
       start = i;
@@ -39,6 +58,7 @@ export function appendToSection(content: string, heading: string, text: string):
 
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
+    if (fenced[i]) continue;
     const m = HEADING.exec(lines[i]!);
     if (m && m[1]!.length <= level) {
       end = i;

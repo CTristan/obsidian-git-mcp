@@ -1,5 +1,5 @@
-import { readFile, realpath, unlink, writeFile } from 'node:fs/promises';
-import { relative, resolve, sep } from 'node:path';
+import { readFile, readlink, realpath, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -171,6 +171,66 @@ function forbiddenReadArgReason(args: Record<string, unknown>): string | undefin
   return undefined;
 }
 
+/**
+ * realpath()'s nearest existing ancestor of `dir`, then relexically rejoins the
+ * still-missing trailing segments. Plain `realpath()` requires every component to
+ * exist, but a brand-new note's parent directory (or a move's destination directory)
+ * routinely doesn't yet — this still resolves any symlink in the part of the path that
+ * *does* exist (including the vault root itself, which may sit behind one, e.g. /tmp on
+ * macOS).
+ */
+async function realpathNearestAncestor(dir: string): Promise<string> {
+  const missing: string[] = [];
+  let cur = dir;
+  for (;;) {
+    try {
+      return join(await realpath(cur), ...missing);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const parent = dirname(cur);
+      if (parent === cur) throw err;
+      missing.unshift(basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+// Bounds symlink-chain following at roughly the OS's own SYMLOOP_MAX (Linux and macOS
+// both use 40), so a symlink cycle (A -> B -> A) can't spin resolveWriteDestination
+// forever the way a single readlink() can't be fooled by one hop.
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Resolves where a forwarded write tool's path argument would actually land on disk —
+ * without requiring the final target to exist, and following the FULL symlink chain
+ * rather than stopping after one hop. `realpath()` throws ENOENT on a dangling symlink,
+ * so a preflight built on it alone misses the reachable attack: a symlink inside the
+ * vault pointing at a not-yet-existing external path, which write_note then creates. A
+ * single readlink() closes that but not its chained form — a first hop that still lands
+ * in-vault, where that path is itself a symlink pointing outside (or into .git) — so
+ * each resolved candidate is re-checked for its own symlink-ness until one isn't.
+ * Returns undefined when the chain doesn't bottom out within MAX_SYMLINK_HOPS: a real
+ * cycle, or a chain deeper than any legitimate vault content needs.
+ */
+async function resolveWriteDestination(
+  vaultPath: string,
+  argPath: string,
+): Promise<string | undefined> {
+  let candidate = resolve(vaultPath, argPath);
+  for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+    const realParent = await realpathNearestAncestor(dirname(candidate));
+    const target = join(realParent, basename(candidate));
+    let link: string;
+    try {
+      link = await readlink(target);
+    } catch {
+      return target; // not a symlink, or nothing there yet — final destination
+    }
+    candidate = resolve(realParent, link);
+  }
+  return undefined;
+}
+
 export async function createVaultServer(config: VaultServerConfig): Promise<VaultServer> {
   const vaultPath = resolve(config.vaultPath);
   const branch = config.branch ?? 'main';
@@ -205,8 +265,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         let content: string;
         try {
           content = await readFile(resolve(vaultPath, relPath), 'utf8');
-        } catch {
-          return; // deleted file — nothing to validate
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return; // deleted file
+          throw err;
         }
         validateNoteContent(relPath, content);
       }
@@ -245,40 +306,32 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     }
     let result: CallToolResult | undefined;
     const sha = await transactor.transact(commitMessageFor(name, args), async () => {
-      result = await callInner(name, args);
-      if (result.isError) {
-        throw new InnerToolError(textOf(result));
-      }
       // MCPVault's own filter only judges the literal argument string, so a symlink
       // whose name looks unremarkable (e.g. "Linked.md") can still resolve onto a
-      // restricted path once followed — and git status never reports .git/ at all,
-      // ignored or not, so the transaction layer's changedPaths() check can never
-      // catch it either. Re-check where each path argument actually landed on disk,
-      // independent of both, and undo the write if it escaped or landed somewhere
-      // restricted.
+      // restricted path or outside the vault entirely once followed — and MCPVault
+      // follows a pre-existing symlink itself, so this has to run before callInner, not
+      // after: by the time an escape is visible in the *result*, the write (or delete)
+      // has already happened. Runs inside the transaction, after fetch/fast-forward, so
+      // it also covers a symlink that only just arrived from the remote (mirrors
+      // appendTool's own ordering below).
       for (const key of ['path', 'oldPath', 'newPath']) {
         const value = args[key];
         if (typeof value !== 'string') continue;
-        let real: string;
-        try {
-          real = await realpath(resolve(vaultPath, value));
-        } catch {
-          continue; // nothing landed there (e.g. oldPath after a move)
+        const destination = await resolveWriteDestination(vaultPath, value);
+        if (destination === undefined) {
+          throw new InnerToolError(`${value}: symlink chain is too deep or cyclic`);
         }
-        const withinVault = real.startsWith(realVaultPath + sep);
+        const withinVault = destination.startsWith(realVaultPath + sep);
         const reason = withinVault
-          ? forbiddenPathReason(relative(realVaultPath, real))
+          ? forbiddenPathReason(relative(realVaultPath, destination))
           : 'refusing to follow a symlink outside the vault';
         if (reason) {
-          // Only clean up a write that landed inside the vault at a restricted path
-          // (e.g. through .git via a committed symlink) — `real` for an out-of-vault
-          // escape is an arbitrary external filesystem path, and unlinking it would
-          // delete a file this server has no business touching.
-          if (withinVault) {
-            await unlink(real).catch(() => {});
-          }
           throw new InnerToolError(`${value}: ${reason}`);
         }
+      }
+      result = await callInner(name, args);
+      if (result.isError) {
+        throw new InnerToolError(textOf(result));
       }
     });
     if (!result) {

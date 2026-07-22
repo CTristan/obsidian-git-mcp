@@ -246,14 +246,14 @@ describe('transaction safety', () => {
     }
   });
 
-  it('a symlink escaping the vault is refused without deleting the external target', async () => {
+  it('a dangling symlink escaping the vault is refused before the write ever creates the external target', async () => {
     // MCPVault's own resolvePath already refuses a symlink whose EXISTING target
-    // resolves outside the vault, so the wrapper's post-write realpath guard only ever
-    // sees the escape for a *dangling* symlink: MCPVault can't realpath a target that
-    // doesn't exist yet, falls back to checking the symlink's parent (inside the vault,
-    // so no refusal), and the write itself creates the file at the symlink's target.
-    // Only then does the wrapper's guard catch the escape — and it must refuse without
-    // deleting the file that write just created outside the vault.
+    // resolves outside the vault, but it can't realpath a target that doesn't exist yet
+    // — for a *dangling* symlink it falls back to checking the symlink's parent (inside
+    // the vault, so no refusal from MCPVault) and lets the write proceed, creating the
+    // file at the symlink's target. The wrapper's own guard must catch this before
+    // forwarding the call at all, by reading the link itself instead of waiting on
+    // realpath() to resolve a target that isn't there yet.
     const target = join(fx.outsideDir, 'external.md');
     await symlink(target, join(fx.collabDir, 'Linked.md'));
     await git(['add', '-A'], fx.collabDir);
@@ -266,7 +266,7 @@ describe('transaction safety', () => {
       content: 'pwned\n',
     });
     expect(res.isError).toBe(true);
-    expect(existsSync(target)).toBe(true);
+    expect(existsSync(target)).toBe(false);
   });
 
   it('a dirty checkout refuses writes until reconciled', async () => {

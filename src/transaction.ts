@@ -162,8 +162,11 @@ export class Transactor {
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // EPERM means the pid exists but belongs to another user/permission domain — still
+      // alive, so keep refusing rather than clearing a live holder's lock. Only ESRCH
+      // (no such process) means dead.
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
     }
   }
 

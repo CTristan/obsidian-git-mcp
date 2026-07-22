@@ -24,14 +24,15 @@ try {
     collaborator: {
       name: collaborator,
       email:
-        process.env['OGM_COLLABORATOR_EMAIL'] ?? `${slug}@collaborators.obsidian-git-mcp.local`,
+        process.env['OGM_COLLABORATOR_EMAIL']?.trim() ||
+        `${slug}@collaborators.obsidian-git-mcp.local`,
     },
     service: {
-      name: process.env['OGM_SERVICE_NAME'] ?? 'obsidian-git-mcp',
-      email: process.env['OGM_SERVICE_EMAIL'] ?? 'service@obsidian-git-mcp.local',
+      name: process.env['OGM_SERVICE_NAME']?.trim() || 'obsidian-git-mcp',
+      email: process.env['OGM_SERVICE_EMAIL']?.trim() || 'service@obsidian-git-mcp.local',
     },
-    branch: process.env['OGM_BRANCH'] ?? 'main',
-    remote: process.env['OGM_REMOTE'] ?? 'origin',
+    branch: process.env['OGM_BRANCH']?.trim() || 'main',
+    remote: process.env['OGM_REMOTE']?.trim() || 'origin',
     allowDestructive: process.env['OGM_ALLOW_DESTRUCTIVE'] === '1',
   });
   await server.connect(new StdioServerTransport());

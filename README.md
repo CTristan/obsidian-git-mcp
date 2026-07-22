@@ -33,7 +33,7 @@ The build does not put `obsidian-git-mcp` on `PATH`. Run `pnpm link --global` fr
 Point the server at a normal git clone of your vault (never your live Obsidian directory — the checkout is the server's workspace and it will hard-reset it to the remote when recovering from a crash):
 
 ```sh
-node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
+OGM_COLLABORATOR="Your Name" node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
 
 The server speaks MCP over stdio. Configuration comes from environment variables:
