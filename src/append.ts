@@ -11,6 +11,9 @@ const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
  */
 export function appendToSection(content: string, heading: string, text: string): string {
   const wanted = heading.trim();
+  if (wanted === '' || /[\r\n]/.test(wanted)) {
+    throw new Error('heading must be a non-empty single line');
+  }
   // Match the note's existing line-ending style, because splicing LF lines into a CRLF
   // note would leave it mixed.
   const useCRLF = content.includes('\r\n');

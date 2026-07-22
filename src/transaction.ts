@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGit, type GitOptions } from './git.js';
@@ -16,6 +17,10 @@ export class LockError extends TransactionError {
 
 export class DirtyCheckoutError extends TransactionError {
   override name = 'DirtyCheckoutError';
+}
+
+export class HiddenIgnoredWriteError extends TransactionError {
+  override name = 'HiddenIgnoredWriteError';
 }
 
 export interface Identity {
@@ -180,27 +185,49 @@ export class Transactor {
   }
 
   /**
-   * Gitignored paths currently present. Plain `git status` skips these entirely, so a
-   * vault that gitignores .obsidian/ (common, since Obsidian's own workspace/cache files
-   * are routinely excluded) would hide a restricted write from changedPaths() forever.
-   * Callers must diff this against a pre-mutation snapshot: a directory that's already
-   * ignored before the transaction started must not fail every later write too, since it
-   * would then never clear again.
+   * Individual gitignored files currently present, recursing into a wholly-ignored
+   * directory instead of collapsing it to one entry the way plain `git status` does —
+   * needed to validate each newly-ignored note on its own and to fingerprint the paths
+   * that were already ignored before the transaction started (see ignoredFingerprint()).
+   * Plain `git status` skips ignored paths entirely, so a vault that gitignores
+   * .obsidian/ (common, since Obsidian's own workspace/cache files are routinely
+   * excluded) would hide a restricted write from changedPaths() forever. Callers must
+   * diff this against a pre-mutation snapshot: a path that's already ignored before the
+   * transaction started must not fail every later write too, since it would then never
+   * clear again.
    */
-  private async ignoredPaths(): Promise<Set<string>> {
+  private async ignoredFiles(): Promise<string[]> {
     const out = await this.git([
       '--no-optional-locks',
-      'status',
-      '--porcelain=v1',
-      '-z',
+      'ls-files',
+      '--others',
       '--ignored',
+      '--exclude-standard',
+      '-z',
     ]);
-    return new Set(
-      out
-        .split('\0')
-        .filter((entry) => entry.startsWith('!!'))
-        .map((entry) => entry.slice(3)),
-    );
+    return out.split('\0').filter((entry) => entry.length > 0);
+  }
+
+  /**
+   * Content fingerprint of a fixed set of paths, order-independent. Git status can never
+   * reveal a content-only edit to a path that's already ignored (ignored paths are
+   * invisible to it, not merely excluded from one output), so the only way to notice a
+   * mutation that only touched already-ignored files is to hash them ourselves before
+   * and after.
+   */
+  private async ignoredFingerprint(relPaths: readonly string[]): Promise<string> {
+    const hash = createHash('sha1');
+    for (const relPath of [...relPaths].sort()) {
+      hash.update(relPath).update('\0');
+      try {
+        hash.update(await readFile(join(this.cfg.vaultPath, relPath)));
+      } catch {
+        // Vanished since being listed; its absence is still folded into the digest via
+        // the path-only update above, so a delete-then-recreate still changes the hash.
+      }
+      hash.update('\0');
+    }
+    return hash.digest('hex');
   }
 
   /** Paths our current HEAD touches relative to `ref` — the committed analog of changedPaths(). */
@@ -273,16 +300,27 @@ export class Transactor {
         this.lastFetchAt = Date.now();
         await this.git(['merge', '--ff-only', this.target()]);
         rollbackTo = await this.git(['rev-parse', 'HEAD']);
-        const ignoredBefore = await this.ignoredPaths();
+        const ignoredBefore = await this.ignoredFiles();
+        const ignoredBeforeFingerprint = await this.ignoredFingerprint(ignoredBefore);
 
         await mutate();
 
         const changed = await this.changedPaths();
-        const newlyIgnored = [...(await this.ignoredPaths())].filter(
-          (path) => !ignoredBefore.has(path),
+        const ignoredBeforeSet = new Set(ignoredBefore);
+        const newlyIgnored = (await this.ignoredFiles()).filter(
+          (path) => !ignoredBeforeSet.has(path),
         );
         const toValidate = [...changed, ...newlyIgnored];
         if (toValidate.length === 0) {
+          if ((await this.ignoredFingerprint(ignoredBefore)) !== ignoredBeforeFingerprint) {
+            // git can neither stage nor commit an already-ignored path, so there is no
+            // safe way to land this edit — only to refuse it and say so, instead of
+            // reporting the untouched HEAD as a successful write.
+            throw new HiddenIgnoredWriteError(
+              'the mutation only touched an already-gitignored path, which git cannot ' +
+                'stage or commit; refusing to report success for an untracked write',
+            );
+          }
           return rollbackTo;
         }
         for (const relPath of toValidate) {

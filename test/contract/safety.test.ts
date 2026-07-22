@@ -1,4 +1,5 @@
-import { writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
@@ -245,6 +246,29 @@ describe('transaction safety', () => {
     }
   });
 
+  it('a symlink escaping the vault is refused without deleting the external target', async () => {
+    // MCPVault's own resolvePath already refuses a symlink whose EXISTING target
+    // resolves outside the vault, so the wrapper's post-write realpath guard only ever
+    // sees the escape for a *dangling* symlink: MCPVault can't realpath a target that
+    // doesn't exist yet, falls back to checking the symlink's parent (inside the vault,
+    // so no refusal), and the write itself creates the file at the symlink's target.
+    // Only then does the wrapper's guard catch the escape — and it must refuse without
+    // deleting the file that write just created outside the vault.
+    const target = join(fx.outsideDir, 'external.md');
+    await symlink(target, join(fx.collabDir, 'Linked.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add external symlink'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    srv = await startServer(fx);
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Linked.md',
+      content: 'pwned\n',
+    });
+    expect(res.isError).toBe(true);
+    expect(existsSync(target)).toBe(true);
+  });
+
   it('a dirty checkout refuses writes until reconciled', async () => {
     srv = await startServer(fx);
     const preRemote = await fx.bareHead();
@@ -268,5 +292,31 @@ describe('transaction safety', () => {
       content: '# New\n',
     });
     expect(retry.isError).toBeFalsy();
+  });
+
+  it('a write that only rewrites an already-gitignored path never reports a hidden success', async () => {
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+
+    srv = await startServer(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+
+    // Present and ignored *before* the transaction starts — the specific case
+    // changedPaths()/newlyIgnored can't see, since the path's ignored membership never
+    // changes across the mutation, only its content does.
+    const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
+    const original = '# Secret\n\noriginal\n';
+    await mkdir(join(fx.serverDir, 'private'), { recursive: true });
+    await writeFile(ignoredPath, original);
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'private/notes.md',
+      content: '# Secret\n\nmutated\n',
+    });
+
+    const postContent = await readFile(ignoredPath, 'utf8');
+    // The one outcome that must never happen: reporting success against an unchanged
+    // HEAD while the mutation actually landed on disk, unvalidated and uncommitted.
+    const hiddenSuccess = !res.isError && commitShaOf(res) === preHead && postContent !== original;
+    expect(hiddenSuccess).toBe(false);
   });
 });

@@ -5,6 +5,29 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
 import { callTool, startServer, textOf, type TestServer } from '../helpers.js';
 
+/** The rejected write never reached the remote — its head is exactly where it was. */
+async function expectRemoteUnchanged(fx: Fixture, preRemote: string): Promise<void> {
+  expect(await fx.bareHead()).toBe(preRemote);
+}
+
+/** The rejected write left no trace in the checkout — nothing staged, nothing dirty. */
+async function expectCleanWorkingTree(fx: Fixture): Promise<void> {
+  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+}
+
+/** Commits a symlink from the collaborator clone and pushes it to the remote. */
+async function commitSymlink(
+  fx: Fixture,
+  linkName: string,
+  target: string,
+  message: string,
+): Promise<void> {
+  await symlink(target, join(fx.collabDir, linkName));
+  await git(['add', '-A'], fx.collabDir);
+  await git(['commit', '-m', message], fx.collabDir);
+  await git(['push', 'origin', 'main'], fx.collabDir);
+}
+
 describe('security', () => {
   let fx: Fixture;
   let srv: TestServer;
@@ -34,8 +57,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.root, 'evil.md'))).toBe(false);
-    const postRemote = await fx.bareHead();
-    expect(postRemote).toBe(preRemote);
+    await expectRemoteUnchanged(fx, preRemote);
   });
 
   it('absolute paths are refused for reads and writes', async () => {
@@ -56,8 +78,8 @@ describe('security', () => {
       content: 'escape attempt\n',
     });
     expect(driveForm.isError).toBe(true);
-    expect(await fx.bareHead()).toBe(preRemote);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanWorkingTree(fx);
   });
 
   it('.obsidian writes are refused at the tool layer', async () => {
@@ -68,9 +90,9 @@ describe('security', () => {
       content: '{"pwned":true}',
     });
     expect(res.isError).toBe(true);
-    expect(await fx.bareHead()).toBe(preRemote);
+    await expectRemoteUnchanged(fx, preRemote);
     expect(await readFile(join(fx.serverDir, '.obsidian', 'app.json'), 'utf8')).toBe(before);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanWorkingTree(fx);
   });
 
   it('.obsidian is refused by wrapper-added tools too', async () => {
@@ -81,9 +103,9 @@ describe('security', () => {
       text: 'y',
     });
     expect(res.isError).toBe(true);
-    expect(await fx.bareHead()).toBe(preRemote);
+    await expectRemoteUnchanged(fx, preRemote);
     expect(existsSync(join(fx.serverDir, '.obsidian', 'note.md'))).toBe(false);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanWorkingTree(fx);
   });
 
   it('append_to_section refuses a symlink that escapes the vault', async () => {
@@ -92,10 +114,7 @@ describe('security', () => {
     // would ever cover the damage.
     const target = join(fx.root, 'outside-target.md');
     await writeFile(target, '# Outside\n\n## X\n\noriginal\n');
-    await symlink('../outside-target.md', join(fx.collabDir, 'Linked.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add symlink'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlink(fx, 'Linked.md', '../outside-target.md', 'collab: add symlink');
 
     const res = await callTool(srv.client, 'append_to_section', {
       path: 'Linked.md',
@@ -104,7 +123,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).not.toContain('injected');
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanWorkingTree(fx);
   });
 
   it('write_note is refused when a committed symlink resolves into .git', async () => {
@@ -113,10 +132,7 @@ describe('security', () => {
     // to catch it. git status never reports .git/ at all, ignored or not, so the
     // transaction layer's changedPaths() scan can never see this write either — closing
     // this hole requires an independent realpath check on the forwarded path itself.
-    await symlink('.git/hooks/pre-commit', join(fx.collabDir, 'Linked.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add malicious symlink'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlink(fx, 'Linked.md', '.git/hooks/pre-commit', 'collab: add malicious symlink');
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Linked.md',
@@ -124,17 +140,14 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.serverDir, '.git', 'hooks', 'pre-commit'))).toBe(false);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanWorkingTree(fx);
   });
 
   it('append_to_section is refused when a committed symlink resolves into .git', async () => {
     // append_to_section touches the filesystem itself (readFile/writeFile) rather than
     // forwarding to MCPVault, so forwardWrite's realpath guard doesn't cover it — this is
     // the same segment-re-check gap as the write_note case above, on appendTool's own path.
-    await symlink('.git/config', join(fx.collabDir, 'Linked.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add malicious symlink'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlink(fx, 'Linked.md', '.git/config', 'collab: add malicious symlink');
 
     const before = await readFile(join(fx.serverDir, '.git', 'config'), 'utf8');
     const res = await callTool(srv.client, 'append_to_section', {
@@ -144,7 +157,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(join(fx.serverDir, '.git', 'config'), 'utf8')).toBe(before);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanWorkingTree(fx);
   });
 
   it('list_directory omits .obsidian', async () => {

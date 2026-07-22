@@ -265,11 +265,18 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         } catch {
           continue; // nothing landed there (e.g. oldPath after a move)
         }
-        const reason = real.startsWith(realVaultPath + sep)
+        const withinVault = real.startsWith(realVaultPath + sep);
+        const reason = withinVault
           ? forbiddenPathReason(relative(realVaultPath, real))
           : 'refusing to follow a symlink outside the vault';
         if (reason) {
-          await unlink(real).catch(() => {});
+          // Only clean up a write that landed inside the vault at a restricted path
+          // (e.g. through .git via a committed symlink) — `real` for an out-of-vault
+          // escape is an arbitrary external filesystem path, and unlinking it would
+          // delete a file this server has no business touching.
+          if (withinVault) {
+            await unlink(real).catch(() => {});
+          }
           throw new InnerToolError(`${value}: ${reason}`);
         }
       }

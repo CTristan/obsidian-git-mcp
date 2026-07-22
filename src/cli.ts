@@ -9,7 +9,7 @@ function fail(message: string): never {
 
 const vaultPath = process.argv[2] ?? fail('usage: obsidian-git-mcp <vault-checkout-path>');
 const collaborator =
-  process.env['OGM_COLLABORATOR'] ??
+  process.env['OGM_COLLABORATOR']?.trim() ||
   fail('OGM_COLLABORATOR is required — it becomes the git author of every write');
 
 // Fall back to a fixed slug when the name has no alphanumerics at all, because an

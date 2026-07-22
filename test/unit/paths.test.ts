@@ -31,4 +31,13 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('.gitignore')).toBeUndefined();
     expect(forbiddenPathReason('notes/data.git.md')).toBeUndefined();
   });
+
+  it('refuses Windows alternate-data-stream segments', () => {
+    // On NTFS, ':' addresses an alternate data stream, so ".git:payload" still
+    // resolves to ".git" on disk and would otherwise slip past the segment check.
+    expect(forbiddenPathReason('.git:payload')).toBeDefined();
+    expect(forbiddenPathReason('note.md:payload')).toBeDefined();
+    expect(forbiddenPathReason('foo/.obsidian:x/bar')).toBeDefined();
+    expect(forbiddenPathReason('Some Note.md')).toBeUndefined();
+  });
 });

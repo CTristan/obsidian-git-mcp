@@ -23,6 +23,11 @@ export function forbiddenPathReason(path: string): string | undefined {
   const segments = normalize(path).replaceAll('\\', '/').split('/');
   if (segments.includes('..')) return 'path traversal is not allowed';
   for (const segment of segments) {
+    // On NTFS, ':' addresses an alternate data stream, so "note.md:payload" or
+    // ".git:payload" still resolve to the base file/directory on disk.
+    if (segment.includes(':')) {
+      return 'alternate data streams are not allowed';
+    }
     // Win32 strips trailing dots and spaces from path segments, so ".git." and ".git "
     // resolve to ".git" on disk; fold those aliases before matching (mirrors MCPVault's
     // canonicalization).

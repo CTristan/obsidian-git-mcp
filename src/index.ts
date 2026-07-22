@@ -1,10 +1,11 @@
 export { appendToSection } from './append.js';
-export { GitError, runGit } from './git.js';
+export { GitError } from './git.js';
 export { forbiddenPathReason } from './paths.js';
 export { createVaultServer, type VaultServer, type VaultServerConfig } from './server.js';
 export {
   ConflictError,
   DirtyCheckoutError,
+  HiddenIgnoredWriteError,
   LockError,
   TransactionError,
   Transactor,
