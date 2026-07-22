@@ -47,6 +47,26 @@ describe('applyCloneDiff symlink safety', () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it('refuses to delete through a symlinked intermediate path', async () => {
+    // A same-uid racer swaps a real vault subdirectory for a symlink pointing outside the
+    // vault after the clone was taken, then plants a same-named file outside. Removing a
+    // clone-deleted entry that runs through that segment must refuse rather than let
+    // unlink resolve through the link and remove the external file.
+    await writeFile(join(outside, 'old.md'), '# Old\n');
+    await symlink(outside, join(vaultPath, 'notes'));
+
+    const before: Manifest = new Map([
+      ['notes/old.md', { size: 6n, mtimeNs: 1n, ino: 1n, isSymlink: false }],
+    ]);
+    const after: Manifest = new Map();
+
+    await expect(
+      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
+    ).rejects.toThrow(/non-directory|outside the vault|path changed/);
+    // The external file survived — the delete never followed the swapped symlink.
+    expect(existsSync(join(outside, 'old.md'))).toBe(true);
+  });
+
   it('refuses to copy back a symlink that appeared in the diff', async () => {
     // MCPVault never creates symlinks, so one showing up as added/changed is tampering.
     // applyCloneDiff must refuse rather than reproduce it in the live vault.

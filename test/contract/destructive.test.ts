@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
 import {
@@ -13,6 +14,26 @@ import {
   textOf,
   type TestServer,
 } from '../helpers.js';
+
+async function expectAttributedCommit(res: CallToolResult, fx: Fixture): Promise<void> {
+  expect(res.isError).toBeFalsy();
+  expect(commitShaOf(res)).toBe(await fx.bareHead());
+
+  const [head] = await fx.bareLog('%H|%an|%ae|%cn|%ce|%s', 1);
+  const [h, authorName, authorEmail, committerName, committerEmail] = head!.split('|');
+  expect(h).toBe(commitShaOf(res));
+  expect(authorName).toBe(TEST_COLLABORATOR.name);
+  expect(authorEmail).toBe(TEST_COLLABORATOR.email);
+  expect(committerName).toBe(SERVICE_NAME);
+  expect(committerEmail).toBe(SERVICE_EMAIL);
+}
+
+/** The refusal must roll the local checkout back too, not just leave the remote alone. */
+async function expectRolledBack(fx: Fixture, preRemote: string, preHead: string): Promise<void> {
+  expect(await fx.bareHead()).toBe(preRemote);
+  expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+}
 
 describe('destructive tools', () => {
   let fx: Fixture;
@@ -69,16 +90,7 @@ describe('destructive tools', () => {
       oldPath: 'Inbox/Beta.md',
       newPath: 'Archive/Beta.md',
     });
-    expect(res.isError).toBeFalsy();
-    expect(commitShaOf(res)).toBe(await fx.bareHead());
-
-    const [head] = await fx.bareLog('%H|%an|%ae|%cn|%ce|%s', 1);
-    const [h, authorName, authorEmail, committerName, committerEmail] = head!.split('|');
-    expect(h).toBe(commitShaOf(res));
-    expect(authorName).toBe(TEST_COLLABORATOR.name);
-    expect(authorEmail).toBe(TEST_COLLABORATOR.email);
-    expect(committerName).toBe(SERVICE_NAME);
-    expect(committerEmail).toBe(SERVICE_EMAIL);
+    await expectAttributedCommit(res, fx);
 
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
@@ -96,16 +108,7 @@ describe('destructive tools', () => {
       confirmOldPath: 'Inbox/Beta.md',
       confirmNewPath: 'Archive/Beta.md',
     });
-    expect(res.isError).toBeFalsy();
-    expect(commitShaOf(res)).toBe(await fx.bareHead());
-
-    const [head] = await fx.bareLog('%H|%an|%ae|%cn|%ce|%s', 1);
-    const [h, authorName, authorEmail, committerName, committerEmail] = head!.split('|');
-    expect(h).toBe(commitShaOf(res));
-    expect(authorName).toBe(TEST_COLLABORATOR.name);
-    expect(authorEmail).toBe(TEST_COLLABORATOR.email);
-    expect(committerName).toBe(SERVICE_NAME);
-    expect(committerEmail).toBe(SERVICE_EMAIL);
+    await expectAttributedCommit(res, fx);
 
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
@@ -121,16 +124,7 @@ describe('destructive tools', () => {
       path: 'Inbox/Beta.md',
       confirmPath: 'Inbox/Beta.md',
     });
-    expect(res.isError).toBeFalsy();
-    expect(commitShaOf(res)).toBe(await fx.bareHead());
-
-    const [head] = await fx.bareLog('%H|%an|%ae|%cn|%ce|%s', 1);
-    const [h, authorName, authorEmail, committerName, committerEmail] = head!.split('|');
-    expect(h).toBe(commitShaOf(res));
-    expect(authorName).toBe(TEST_COLLABORATOR.name);
-    expect(authorEmail).toBe(TEST_COLLABORATOR.email);
-    expect(committerName).toBe(SERVICE_NAME);
-    expect(committerEmail).toBe(SERVICE_EMAIL);
+    await expectAttributedCommit(res, fx);
 
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
@@ -158,10 +152,7 @@ describe('destructive tools', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).toBe(before);
-    expect(await fx.bareHead()).toBe(preRemote);
-    // The refusal must roll the local checkout back too, not just leave the remote alone.
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('move_note through a symlink is refused without copying the external target into the vault', async () => {
@@ -185,10 +176,7 @@ describe('destructive tools', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).toBe(before);
-    expect(await fx.bareHead()).toBe(preRemote);
-    // The refusal must roll the local checkout back too, not just leave the remote alone.
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectRolledBack(fx, preRemote, preHead);
   });
 
   it('move_note is refused when newPath is a 2-hop symlink chain resolving outside the vault', async () => {
@@ -219,9 +207,6 @@ describe('destructive tools', () => {
     expect(res.isError).toBe(true);
     expect(existsSync(externalTarget)).toBe(false);
     expect(await git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).toContain('squirrels');
-    expect(await fx.bareHead()).toBe(preRemote);
-    // The refusal must roll the local checkout back too, not just leave the remote alone.
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectRolledBack(fx, preRemote, preHead);
   });
 });

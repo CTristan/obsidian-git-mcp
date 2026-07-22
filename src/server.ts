@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open, readFile, readlink, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
+import { readFile, readlink, realpath, rm, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -14,9 +14,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { appendToSection } from './append.js';
 import { forbiddenPathReason } from './paths.js';
-import { applyCloneDiff, cloneWorktree, manifestOf, writeAllAt } from './staging.js';
+import {
+  applyCloneDiff,
+  cloneWorktree,
+  manifestOf,
+  openPinnedHandle,
+  writeAllAt,
+} from './staging.js';
 import { Transactor, type Identity } from './transaction.js';
-import { validateNoteContent, ValidationError } from './validate.js';
+import { refuseExecutableFrontmatter, validateNoteContent, ValidationError } from './validate.js';
 
 const VERSION = '0.1.0';
 
@@ -26,7 +32,11 @@ const VERSION = '0.1.0';
 const NOTE_EXTENSIONS = ['.md', '.markdown'];
 
 function isNoteFile(path: string): boolean {
-  return NOTE_EXTENSIONS.some((ext) => path.endsWith(ext));
+  // MCPVault's own PathFilter lowercases before matching allowedExtensions, so this
+  // check must too, or a mixed-case note (e.g. Note.MD) skips validateNoteContent
+  // while MCPVault still writes it.
+  const lower = path.toLowerCase();
+  return NOTE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 // MCPVault's 15 tools, classified by effect. Anything unknown is refused, because a
@@ -158,29 +168,15 @@ class InnerToolError extends Error {
 // get_notes_info). search_notes/get_vault_stats/list_all_tags take none of these.
 const READ_PATH_ARG_KEYS = ['path', 'paths'];
 
-/**
- * Preflights read-tool path args against forbiddenPathReason before forwarding to
- * MCPVault — mirroring forwardWrite's preflight, because MCPVault's own PathFilter is
- * not a boundary this wrapper controls. An empty string is list_directory's documented
- * way of asking for the vault root, not an escape attempt, so it's exempt.
- */
-function forbiddenReadArgReason(args: Record<string, unknown>): string | undefined {
-  for (const key of READ_PATH_ARG_KEYS) {
-    const value = args[key];
-    if (typeof value === 'string' && value !== '') {
-      const reason = forbiddenPathReason(value);
-      if (reason) return `${value}: ${reason}`;
-    } else if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === 'string' && item !== '') {
-          const reason = forbiddenPathReason(item);
-          if (reason) return `${item}: ${reason}`;
-        }
-      }
-    }
-  }
-  return undefined;
-}
+// Path-like arg keys across the write/delegated-write tools: a single note path
+// (write_note, patch_note, append_to_section) or a move's source/destination
+// (move_note, move_file). Named to match READ_PATH_ARG_KEYS above so the two
+// containment loops that reference it (assertWriteDestinationsContained and
+// forwardWrite's preflight) can't drift apart on which keys carry a path.
+// move_file's confirmOldPath/confirmNewPath aren't listed: MCPVault rejects the call
+// outright unless they're byte-identical to oldPath/newPath, so they never carry a
+// destination of their own for containment to check.
+const WRITE_PATH_ARG_KEYS = ['path', 'oldPath', 'newPath'];
 
 /**
  * realpath()'s nearest existing ancestor of `dir`, then relexically rejoins the
@@ -207,12 +203,12 @@ async function realpathNearestAncestor(dir: string): Promise<string> {
 }
 
 // Bounds symlink-chain following at roughly the OS's own SYMLOOP_MAX (Linux and macOS
-// both use 40), so a symlink cycle (A -> B -> A) can't spin resolveWriteDestination
+// both use 40), so a symlink cycle (A -> B -> A) can't spin resolveSymlinkDestination
 // forever the way a single readlink() can't be fooled by one hop.
 const MAX_SYMLINK_HOPS = 40;
 
 /**
- * Resolves where a forwarded write tool's path argument would actually land on disk —
+ * Resolves where a forwarded path argument (read or write) would actually land on disk —
  * without requiring the final target to exist, and following the FULL symlink chain
  * rather than stopping after one hop. `realpath()` throws ENOENT on a dangling symlink,
  * so a preflight built on it alone misses the reachable attack: a symlink inside the
@@ -223,7 +219,7 @@ const MAX_SYMLINK_HOPS = 40;
  * Returns undefined when the chain doesn't bottom out within MAX_SYMLINK_HOPS: a real
  * cycle, or a chain deeper than any legitimate vault content needs.
  */
-async function resolveWriteDestination(
+async function resolveSymlinkDestination(
   vaultPath: string,
   argPath: string,
 ): Promise<string | undefined> {
@@ -240,6 +236,18 @@ async function resolveWriteDestination(
     candidate = resolve(realParent, link);
   }
   return undefined;
+}
+
+/**
+ * Classifies a resolved write destination against `realRoot`: the forbidden-path reason
+ * when it lands inside the root, or the fixed out-of-vault refusal when it escapes.
+ * Shared by every symlink-containment check in this file so the refusal wording and the
+ * containment predicate can't drift between callers.
+ */
+function containmentReason(realRoot: string, resolved: string): string | undefined {
+  return resolved.startsWith(realRoot + sep)
+    ? forbiddenPathReason(relative(realRoot, resolved))
+    : 'refusing to follow a symlink outside the vault';
 }
 
 export async function createVaultServer(config: VaultServerConfig): Promise<VaultServer> {
@@ -283,6 +291,17 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         validateNoteContent(relPath, content);
       }
     },
+    refuseExecutableNote: async (relPath) => {
+      if (!isNoteFile(relPath)) return;
+      let content: string;
+      try {
+        content = await readFile(resolve(vaultPath, relPath), 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return; // deleted/renamed away
+        throw err;
+      }
+      refuseExecutableFrontmatter(relPath, content);
+    },
   });
   await transactor.reconcileAtStartup();
 
@@ -312,21 +331,56 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     root: string,
     realRoot: string,
   ): Promise<void> => {
-    for (const key of ['path', 'oldPath', 'newPath']) {
+    for (const key of WRITE_PATH_ARG_KEYS) {
       const value = args[key];
       if (typeof value !== 'string') continue;
-      const destination = await resolveWriteDestination(root, value);
+      const destination = await resolveSymlinkDestination(root, value);
       if (destination === undefined) {
         throw new InnerToolError(`${value}: symlink chain is too deep or cyclic${swapContext}`);
       }
-      const withinVault = destination.startsWith(realRoot + sep);
-      const reason = withinVault
-        ? forbiddenPathReason(relative(realRoot, destination))
-        : 'refusing to follow a symlink outside the vault';
+      const reason = containmentReason(realRoot, destination);
       if (reason) {
         throw new InnerToolError(`${value}: ${reason}${swapContext}`);
       }
     }
+  };
+
+  // Same realpath-nearest-ancestor resolution as assertWriteDestinationsContained above,
+  // run against READ_TOOLS' path args before forwarding to MCPVault. MCPVault's own
+  // resolvePath() only confirms a symlink resolves INSIDE the vault, and its pathFilter
+  // match is against the literal argument string — so a symlink whose target is
+  // .git/config (or any other forbidden segment) passes both of MCPVault's checks and
+  // readFile follows it straight through. An empty string is list_directory's documented
+  // way of asking for the vault root, not an escape attempt, so it's exempt.
+  const readPathReason = async (value: string): Promise<string | undefined> => {
+    const lexical = forbiddenPathReason(value);
+    if (lexical) return `${value}: ${lexical}`;
+    const destination = await resolveSymlinkDestination(vaultPath, value);
+    if (destination === undefined) {
+      return `${value}: symlink chain is too deep or cyclic`;
+    }
+    const reason = containmentReason(realVaultPath, destination);
+    return reason ? `${value}: ${reason}` : undefined;
+  };
+
+  const forbiddenReadArgReason = async (
+    args: Record<string, unknown>,
+  ): Promise<string | undefined> => {
+    for (const key of READ_PATH_ARG_KEYS) {
+      const value = args[key];
+      if (typeof value === 'string' && value !== '') {
+        const reason = await readPathReason(value);
+        if (reason) return reason;
+      } else if (Array.isArray(value)) {
+        for (const item of value) {
+          if (typeof item === 'string' && item !== '') {
+            const reason = await readPathReason(item);
+            if (reason) return reason;
+          }
+        }
+      }
+    }
+    return undefined;
   };
 
   const forwardWrite = async (
@@ -335,7 +389,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   ): Promise<CallToolResult> => {
     // Preflight the path arguments before anything touches MCPVault — the path-filter
     // layer must refuse on its own, not lean on the post-mutation transaction check.
-    for (const key of ['path', 'oldPath', 'newPath']) {
+    for (const key of WRITE_PATH_ARG_KEYS) {
       const value = args[key];
       if (typeof value === 'string') {
         const reason = forbiddenPathReason(value);
@@ -467,33 +521,23 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       } catch {
         throw new InnerToolError(`${path}: note not found`);
       }
-      const reason = real.startsWith(realVaultPath + sep)
-        ? forbiddenPathReason(relative(realVaultPath, real))
-        : 'refusing to follow a symlink outside the vault';
+      const reason = containmentReason(realVaultPath, real);
       if (reason) {
         throw new InnerToolError(`${path}: ${reason}`);
       }
-      // fd-pin the write against a TOCTOU swap between this resolution and the write. We
-      // open the resolved target with O_NOFOLLOW (its final hop can't be turned into a
-      // symlink under us), then re-resolve absPath and match the handle's inode against
-      // the path's before trusting it. Soundness: a swap BEFORE open is caught here — the
-      // path no longer maps to the pinned inode or it now escapes the vault; a swap AFTER
-      // open can't redirect anything, because the fd is already bound to the validated
-      // inode, not to a name the attacker can re-point.
+      // fd-pin the write against a TOCTOU swap between this resolution and the write,
+      // through the same guard applyCloneDiff's writer uses (staging.ts). We re-resolve
+      // absPath rather than real, so the recheck covers absPath's whole symlink chain, not
+      // just real's final segment.
       let handle: FileHandle | undefined;
       try {
-        handle = await open(real, constants.O_RDWR | constants.O_NOFOLLOW);
-        const reReal = await realpath(absPath);
-        const reReason = reReal.startsWith(realVaultPath + sep)
-          ? forbiddenPathReason(relative(realVaultPath, reReal))
-          : 'refusing to follow a symlink outside the vault';
-        if (reReal !== real || reReason) {
-          throw new InnerToolError(`${path}: path changed during the write`);
-        }
-        const [handleStat, pathStat] = await Promise.all([handle.stat(), stat(real)]);
-        if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
-          throw new InnerToolError(`${path}: path changed during the write`);
-        }
+        handle = await openPinnedHandle(
+          real,
+          absPath,
+          real,
+          constants.O_RDWR | constants.O_NOFOLLOW,
+          (message) => new InnerToolError(`${path}: ${message}`),
+        );
         const content = await handle.readFile('utf8');
         const updated = Buffer.from(appendToSection(content, heading, text));
         // truncate first, because a shrinking write would otherwise leave stale trailing
@@ -562,11 +606,18 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return await forwardWrite(name, args);
       }
       if (READ_TOOLS.has(name)) {
-        const reason = forbiddenReadArgReason(args);
-        if (reason) {
-          return errorResult(reason);
-        }
-        const { headSha, result } = await transactor.readTransaction(() => callInner(name, args));
+        // The containment check has to run AFTER readTransaction's own freshen
+        // (fetch/fast-forward) step, inside the same critical section — not before it —
+        // or it judges the pre-fetch checkout while callInner below reads the
+        // just-arrived one, letting a symlink pushed by another collaborator slip
+        // through on the read that first observes it.
+        const { headSha, result } = await transactor.readTransaction(async () => {
+          const reason = await forbiddenReadArgReason(args);
+          if (reason) {
+            throw new InnerToolError(reason);
+          }
+          return await callInner(name, args);
+        });
         return { ...result, _meta: { ...(result._meta ?? {}), headSha } };
       }
       return errorResult(`unknown tool: ${name}`);

@@ -102,6 +102,21 @@ describe('validateNoteContent', () => {
     expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
   });
 
+  it('refuses a mixed-case ---JS frontmatter tag instead of running it', () => {
+    // gray-matter lowercases the language tag before looking it up in the caller-supplied
+    // `engines` map, so `---JS` still resolves to the refusing engine above — this locks
+    // that in against a future gray-matter bump silently reopening a case-variant bypass.
+    (globalThis as Record<string, unknown>)['__validateProbe'] = false;
+    const payload = [
+      '---JS',
+      'module.exports = { t: ((globalThis.__validateProbe = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    expect(() => validateNoteContent('Note.md', payload)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+  });
+
   it('refuses a YAML frontmatter that deserializes a js/function tag', () => {
     // Defense-in-depth guard: gray-matter's YAML engine uses js-yaml safe-load, which
     // rejects the !!js/function tag rather than constructing a callable — this locks that

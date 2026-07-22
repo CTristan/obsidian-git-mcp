@@ -14,7 +14,7 @@ import {
   type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /**
  * One file or symlink recorded by manifestOf. mtime is nanosecond-precise (bigint) on
@@ -34,12 +34,16 @@ export type Manifest = Map<string, ManifestEntry>;
 
 /**
  * Clone the vault worktree into an ephemeral 0700 dir so a delegated write mutates a
- * throwaway copy instead of the live vault. Every top-level entry except `.git` is copied
- * — `.git` is the server's own transaction state, never something a delegated tool writes,
- * and excluding it keeps the clone small. verbatimSymlinks preserves each symlink as a
- * link (the containment check downstream depends on seeing links, not their resolved
- * targets), and FICLONE requests a copy-on-write reflink per file, silently falling back
- * to a byte copy on filesystems without reflink support (the CI path on ubuntu).
+ * throwaway copy instead of the live vault. Every top-level entry except `.git` and
+ * `.obsidian` is copied — `.git` is the server's own transaction state, `.obsidian` is
+ * Obsidian's own gitignored workspace/cache tree (can hold multi-MB of plugin data, per
+ * transaction.ts's ignoredFiles doc), and forbiddenPathReason refuses any delegated write
+ * under either anyway, so a stage that never receives it just skips paying for a copy (and
+ * a later manifestOf walk) it would only have to throw away. verbatimSymlinks preserves
+ * each symlink as a link (the containment check downstream depends on seeing links, not
+ * their resolved targets), and FICLONE requests a copy-on-write reflink per file, silently
+ * falling back to a byte copy on filesystems without reflink support (the CI path on
+ * ubuntu).
  */
 export async function cloneWorktree(vaultPath: string): Promise<string> {
   // mkdtemp has no mode option, so tighten to 0700 before copying anything in — the clone
@@ -52,7 +56,7 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
     mode: constants.COPYFILE_FICLONE,
   } as const;
   for (const entry of await readdir(vaultPath)) {
-    if (entry === '.git') continue;
+    if (entry === '.git' || entry === '.obsidian') continue;
     await cp(join(vaultPath, entry), join(dir, entry), opts);
   }
   return dir;
@@ -152,14 +156,59 @@ async function mkdirNoFollow(vaultPath: string, rel: string): Promise<void> {
 }
 
 /**
- * Copy one changed/added clone file into the real vault through an fd-pinned write. We
- * open the target with O_NOFOLLOW (its final hop can't be a symlink under us), then
- * re-resolve and match the bound fd's inode against the resolved path before trusting it.
- * Soundness mirrors appendTool's: a swap BEFORE open is caught here — the resolved path
- * escapes the vault or no longer maps to the pinned inode; a swap AFTER open can't
- * redirect anything, because the fd is already bound to the validated inode, not to a name
- * the attacker can re-point. Same-uid live tampering of the ephemeral clone dir stays
- * theoretically possible, because nothing userland eliminates a same-uid attacker.
+ * Open `openTarget` for writing and hand back a handle pinned to `expectedReal`, or throw
+ * (via `makeMismatchError`, closing the handle first) if the two go out of sync between
+ * resolution and open. `flags` must carry O_NOFOLLOW, so a symlink dropped in at the final
+ * path segment fails the open outright rather than getting silently followed. Two checks
+ * cover what O_NOFOLLOW alone can't:
+ *
+ * - `reResolveTarget` (the same path as `openTarget` for a caller that resolved its target
+ *   right before opening it; the caller's original, possibly symlink-laden argument for one
+ *   that resolved it earlier, before an await boundary) must still realpath() to exactly
+ *   `expectedReal` — catching a symlink swapped in anywhere along that path's resolution
+ *   chain, not just its final segment.
+ * - The open handle's dev/ino must match a fresh stat of `expectedReal` — catching a
+ *   same-name regular-file replacement, which a realpath match alone can't, since unlink
+ *   followed by recreating a plain file at the same name resolves identically.
+ *
+ * A swap before this runs is caught by one of the two checks above; a swap after is moot,
+ * because the returned fd is already bound to the validated inode, not to a name an
+ * attacker can re-point. Callers own containment — this only pins whatever `expectedReal`
+ * turned out to be, and must already have confirmed it sits inside the vault. On success,
+ * closing the returned handle is the caller's responsibility.
+ */
+export async function openPinnedHandle(
+  openTarget: string,
+  reResolveTarget: string,
+  expectedReal: string,
+  flags: number,
+  makeMismatchError: (message: string) => Error,
+): Promise<FileHandle> {
+  const handle = await open(openTarget, flags, 0o644);
+  try {
+    const resolved = await realpath(reResolveTarget);
+    if (resolved !== expectedReal) {
+      throw makeMismatchError('path changed during the write');
+    }
+    const [handleStat, pathStat] = await Promise.all([handle.stat(), stat(expectedReal)]);
+    if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
+      throw makeMismatchError('path changed during the write');
+    }
+  } catch (err) {
+    await handle.close();
+    throw err;
+  }
+  return handle;
+}
+
+/**
+ * Copy one changed/added clone file into the real vault through openPinnedHandle. Strict
+ * equality against `join(realVaultPath, rel)`, not mere containment: a diff path never
+ * traverses a symlink in the clone (the walk records links without descending them), so
+ * its live-vault counterpart must resolve to exactly the canonical path — a resolution
+ * landing anywhere else, even inside the vault, is a redirect, not our write. Same-uid live
+ * tampering of the ephemeral clone dir stays theoretically possible, because nothing
+ * userland eliminates a same-uid attacker.
  */
 async function writeIntoVault(
   vaultPath: string,
@@ -170,27 +219,51 @@ async function writeIntoVault(
   const bytes = await readFile(join(cloneDir, rel));
   const target = join(vaultPath, rel);
   await mkdirNoFollow(vaultPath, rel);
-  let handle: FileHandle | undefined;
+  const handle = await openPinnedHandle(
+    target,
+    target,
+    join(realVaultPath, rel),
+    constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
+    (message) => new Error(`${rel}: ${message}`),
+  );
   try {
-    handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o644);
-    const resolved = await realpath(target);
-    // Strict equality, not mere containment: a diff path never traverses a symlink in the
-    // clone (the walk records links without descending them), so its live-vault counterpart
-    // must resolve to exactly the canonical path — a resolution landing anywhere else, even
-    // inside the vault, is a redirect, not our write.
-    if (resolved !== join(realVaultPath, rel)) {
-      throw new Error(`${rel}: path changed during the write`);
-    }
-    const [handleStat, pathStat] = await Promise.all([handle.stat(), stat(resolved)]);
-    if (handleStat.dev !== pathStat.dev || handleStat.ino !== pathStat.ino) {
-      throw new Error(`${rel}: path changed during the write`);
-    }
     // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
     await handle.truncate(0);
     await writeAllAt(handle, bytes);
   } finally {
-    await handle?.close();
+    await handle.close();
   }
+}
+
+/**
+ * Delete rel's target from vaultPath without ever following a symlink standing in for a
+ * parent directory. Walks each parent segment exactly like mkdirNoFollow — refusing a
+ * symlink or non-directory anywhere in the chain — then confirms the fully resolved path
+ * still lands at the canonical vault location before unlinking, closing the same
+ * swapped-parent window openPinnedHandle closes for writes. unlink() itself never follows
+ * a symlink at the final segment, so a deleted entry that was a symlink drops only the
+ * in-vault link, never whatever it pointed at.
+ */
+async function unlinkNoFollow(
+  vaultPath: string,
+  realVaultPath: string,
+  rel: string,
+): Promise<void> {
+  let cur = vaultPath;
+  for (const segment of dirname(rel).split('/')) {
+    if (segment === '' || segment === '.') continue;
+    cur = join(cur, segment);
+    const st = await lstat(cur);
+    if (!st.isDirectory()) {
+      throw new Error(`${rel}: refusing to delete through a non-directory at ${segment}`);
+    }
+  }
+  const target = join(vaultPath, rel);
+  const resolved = await realpath(target);
+  if (resolved !== join(realVaultPath, rel)) {
+    throw new Error(`${rel}: refusing to delete — path resolved outside the vault`);
+  }
+  await unlink(target);
 }
 
 /**
@@ -199,8 +272,8 @@ async function writeIntoVault(
  * changed/added entry that is a symlink is refused outright — MCPVault never creates or
  * rewrites symlinks, so one appearing in the diff is tampering, not a legitimate write
  * (an unchanged in-vault symlink the write merely resolved *through* never enters the
- * diff, so it stays untouched). This is the only path that mutates the real vault, and it
- * only ever does so through the fd-pinned writer above.
+ * diff, so it stays untouched). This and appendTool (server.ts) are the only two paths
+ * that mutate the real vault, and both do so exclusively through openPinnedHandle above.
  */
 export async function applyCloneDiff(
   vaultPath: string,
@@ -218,18 +291,13 @@ export async function applyCloneDiff(
   }
   for (const rel of before.keys()) {
     if (after.has(rel)) continue;
-    const target = join(vaultPath, rel);
-    // lstat then unlink: unlink never follows a final symlink, so a deleted entry that was
-    // a symlink drops only the in-vault link, never whatever it pointed at. Tolerate a
-    // path that already vanished (a concurrent removal) rather than failing the write.
+    // Tolerate a path that already vanished anywhere along the walk (a concurrent
+    // removal) rather than failing the write.
     try {
-      await lstat(target);
+      await unlinkNoFollow(vaultPath, realVaultPath, rel);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw err;
     }
-    await unlink(target).catch((err) => {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    });
   }
 }

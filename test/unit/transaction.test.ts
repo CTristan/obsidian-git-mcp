@@ -26,6 +26,7 @@ function makeTransactor(fx: Fixture, overrides: Partial<TransactorConfig> = {}):
     readFreshnessMs: 0,
     maxPushRetries: 0,
     validateChangedFile: async () => {},
+    refuseExecutableNote: async () => {},
     ...overrides,
   });
 }

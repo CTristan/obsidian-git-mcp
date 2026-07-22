@@ -40,6 +40,12 @@ export interface TransactorConfig {
   maxPushRetries: number;
   /** Called on every file a transaction changed, before commit. Throw to roll back. */
   validateChangedFile: (relPath: string) => Promise<void>;
+  /**
+   * Called on every note a fetch/fast-forward newly landed, before any read is served.
+   * Throw to refuse the read outright — unlike validateChangedFile, there is no local
+   * mutation to roll back here, only remote content this process didn't write.
+   */
+  refuseExecutableNote: (relPath: string) => Promise<void>;
   /** Test seam: runs before every push attempt. */
   beforePush?: (() => Promise<void>) | undefined;
   /** Test seam: runs after every git invocation resolves, before its result returns. */
@@ -57,6 +63,9 @@ export class Transactor {
   private chain: Promise<unknown> = Promise.resolve();
   private lastFetchAt = 0;
   private readonly lockPath: string;
+  // The HEAD through which every note has already cleared refuseExecutableNote. undefined
+  // until reconcileAtStartup's first pass; readTransaction advances it after each scan.
+  private validatedThroughSha: string | undefined;
 
   constructor(private readonly cfg: TransactorConfig) {
     // Plain-clone assumption (no worktrees): the lock lives inside .git so it can never
@@ -236,13 +245,20 @@ export class Transactor {
    * content hash would catch but only by paying that read on every single write.
    */
   private async ignoredFingerprint(relPaths: readonly string[]): Promise<string> {
+    if (relPaths.length === 0) return '';
+    const sorted = [...relPaths].sort();
+    const stats = await Promise.all(
+      sorted.map((relPath) =>
+        lstat(join(this.cfg.vaultPath, relPath)).catch(() => undefined),
+      ),
+    );
     const hash = createHash('sha1');
-    for (const relPath of [...relPaths].sort()) {
+    for (const [index, relPath] of sorted.entries()) {
       hash.update(relPath).update('\0');
-      try {
-        const stats = await lstat(join(this.cfg.vaultPath, relPath));
-        hash.update(`${stats.size}\0${stats.mtimeMs}`);
-      } catch {
+      const stat = stats[index];
+      if (stat) {
+        hash.update(`${stat.size}\0${stat.mtimeMs}`);
+      } else {
         // Vanished since being listed; its absence is still folded into the digest via
         // the path-only update above, so a delete-then-recreate still changes the hash.
       }
@@ -255,6 +271,28 @@ export class Transactor {
   private async changedPathsSince(ref: string): Promise<string[]> {
     const out = await this.git(['diff', '--name-only', '-z', ref, 'HEAD']);
     return out.split('\0').filter((entry) => entry.length > 0);
+  }
+
+  /**
+   * Refuses to let a read proceed until every note reachable from the current HEAD has
+   * been checked by refuseExecutableNote — not just whatever this call's own fetch just
+   * landed. transact()'s mandatory fetch can advance HEAD without ever routing through
+   * here, so the gap this closes is "HEAD moved since we last scanned," not "did this
+   * particular call just fetch." First run (validatedThroughSha undefined) scans every
+   * tracked file; later runs scan only the diff, since anything at or before
+   * validatedThroughSha already cleared this same check.
+   */
+  private async refuseUnvalidatedFetchedNotes(): Promise<void> {
+    const head = await this.git(['rev-parse', 'HEAD']);
+    if (head === this.validatedThroughSha) return;
+    const paths =
+      this.validatedThroughSha === undefined
+        ? (await this.git(['ls-files', '-z'])).split('\0').filter((entry) => entry.length > 0)
+        : await this.changedPathsSince(this.validatedThroughSha);
+    for (const relPath of paths) {
+      await this.cfg.refuseExecutableNote(relPath);
+    }
+    this.validatedThroughSha = head;
   }
 
   /**
@@ -276,6 +314,10 @@ export class Transactor {
     } else {
       await this.git(['merge', '--ff-only', this.target()]);
     }
+    // Establishes the baseline before this process ever serves a read — a vault that
+    // already carries an executable-frontmatter note refuses to come up rather than
+    // starting compromised.
+    await this.refuseUnvalidatedFetchedNotes();
   }
 
   /**
@@ -298,6 +340,10 @@ export class Transactor {
           await this.git(['merge', '--ff-only', this.target()]).catch(() => {});
         }
       }
+      // Unconditional, not gated on this call's own fetch above: transact()'s mandatory
+      // fetch can have advanced HEAD between reads without ever visiting this method, and
+      // a note it landed must still clear this check before the next read touches it.
+      await this.refuseUnvalidatedFetchedNotes();
       const headSha = await this.git(['rev-parse', 'HEAD']);
       const result = await read();
       return { headSha, result };

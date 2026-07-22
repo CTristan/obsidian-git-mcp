@@ -302,6 +302,57 @@ describe('security', () => {
     expect(res.isError).toBe(true);
   });
 
+  it('read_note is refused when a committed symlink resolves into .git', async () => {
+    // forbiddenReadArgReason checked only the literal "Linked.md" string, and MCPVault's
+    // own resolvePath() only confirms the symlink resolves INSIDE the vault — its
+    // pathFilter match is against the same literal name, which has no .git segment. Both
+    // layers pass a symlink whose target is .git/config, and readFile follows it, so this
+    // needs the same realpath-nearest-ancestor check the write path already runs.
+    await commitSymlink(fx, 'Linked.md', '.git/config', 'collab: add malicious symlink');
+
+    const res = await callTool(srv.client, 'read_note', { path: 'Linked.md' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toContain('[remote "origin"]');
+  });
+
+  it('read_note refuses a note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
+    // MCPVault's own FrontmatterHandler.parse only overrides gray-matter's yaml engine, so
+    // gray-matter merges its default js/javascript engines back in on every read — a note
+    // pushed by a collaborator (never touched by this wrapper's write-path validation)
+    // lands via readTransaction's own fetch/fast-forward and must be refused before
+    // read_note ever hands it to MCPVault.
+    (globalThis as Record<string, unknown>)['__ogmRceProbeTargeted'] = false;
+    const payload = [
+      '---js',
+      'module.exports = { t: ((globalThis.__ogmRceProbeTargeted = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    await fx.collabWrite('Malicious.md', payload, 'collab: add malicious note');
+
+    const res = await callTool(srv.client, 'read_note', { path: 'Malicious.md' });
+    expect(res.isError).toBe(true);
+    expect((globalThis as Record<string, unknown>)['__ogmRceProbeTargeted']).toBe(false);
+  });
+
+  it('list_all_tags refuses wholesale when a fetched note anywhere in the vault carries executable frontmatter', async () => {
+    // list_all_tags takes no target path — it scans every note in the vault, so the
+    // targeted read_note-shaped guard alone can't cover it. The RCE note doesn't need to
+    // be the one asked for; it only needs to be reachable from HEAD.
+    (globalThis as Record<string, unknown>)['__ogmRceProbeUntargeted'] = false;
+    const payload = [
+      '---js',
+      'module.exports = { t: ((globalThis.__ogmRceProbeUntargeted = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    await fx.collabWrite('Inbox/Malicious2.md', payload, 'collab: add malicious note');
+
+    const res = await callTool(srv.client, 'list_all_tags', {});
+    expect(res.isError).toBe(true);
+    expect((globalThis as Record<string, unknown>)['__ogmRceProbeUntargeted']).toBe(false);
+  });
+
   it('read_multiple_notes is refused wholesale when one path targets .git', async () => {
     // MCPVault denies the individual path internally but reports it in a non-error "err"
     // array rather than isError, so a caller that only checks isError sees this as a
