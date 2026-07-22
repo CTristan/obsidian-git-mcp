@@ -1,3 +1,5 @@
+import { symlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import matter from 'gray-matter';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, SEED_NOTES, type Fixture } from '../fixture.js';
@@ -83,5 +85,54 @@ describe('writes', () => {
     // Sibling keys survive the merge semantically — MCPVault normalizes flow-style
     // whitespace ([project] -> [ project ]), so assert the parsed data, not the bytes.
     expect(matter(remote).data).toEqual({ tags: ['project'], status: 'done' });
+  });
+
+  it('write_note through an in-vault symlink updates the target note', async () => {
+    // Seed a real note plus a relative in-vault symlink pointing at it, via the
+    // collaborator clone, so the server picks the pair up on its next fetch. Clone-staging
+    // must keep in-vault symlink semantics byte-identical: the delegated write runs
+    // against a symlink-preserving private clone, so following Alias.md onto Target.md
+    // works exactly as it does on a plain checkout — the link is content, not an escape.
+    await writeFile(join(fx.collabDir, 'Target.md'), '# Target\n\noriginal.\n');
+    await symlink('Target.md', join(fx.collabDir, 'Alias.md'));
+    await git(['add', '-A'], fx.collabDir);
+    await git(['commit', '-m', 'collab: add note and in-vault alias symlink'], fx.collabDir);
+    await git(['push', 'origin', 'main'], fx.collabDir);
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Alias.md',
+      content: '# Target\n\nrewritten through the alias.\n',
+    });
+    expect(res.isError).toBeFalsy();
+
+    // The write followed the symlink onto the real note — Target.md carries the new bytes.
+    expect(await fx.remoteFile('Target.md')).toBe('# Target\n\nrewritten through the alias.\n');
+
+    // And Alias.md is still a symlink (tree mode 120000) whose blob is exactly its target
+    // path — not clobbered into a regular file holding the content.
+    const entry = await git(['ls-tree', 'main', 'Alias.md'], fx.bareDir);
+    expect(entry.startsWith('120000 ')).toBe(true);
+    expect(await fx.remoteFile('Alias.md')).toBe('Target.md');
+  });
+
+  it('a failed delegated write leaves the checkout and remote untouched', async () => {
+    // The delegated write runs against a private clone; when the inner tool errors (here a
+    // patch whose oldString is nowhere in the note), nothing is copied back and the
+    // transaction aborts — so both the local checkout and the remote stay exactly as they
+    // were. HEAD-unchanged (not merely a clean working tree) rules out a local commit that
+    // silently failed to push.
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await fx.bareHead();
+
+    const res = await callTool(srv.client, 'patch_note', {
+      path: 'Projects/Alpha.md',
+      oldString: 'this exact text does not occur anywhere in Alpha.',
+      newString: 'unreachable replacement',
+    });
+    expect(res.isError).toBe(true);
+
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    expect(await fx.bareHead()).toBe(preRemote);
   });
 });

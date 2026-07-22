@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open, readFile, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { open, readFile, readlink, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -14,6 +14,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { appendToSection } from './append.js';
 import { forbiddenPathReason } from './paths.js';
+import { applyCloneDiff, cloneWorktree, manifestOf } from './staging.js';
 import { Transactor, type Identity } from './transaction.js';
 import { validateNoteContent, ValidationError } from './validate.js';
 
@@ -300,25 +301,27 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     (await innerClient.callTool({ name, arguments: args })) as CallToolResult;
 
   // Resolves every write-path arg to where it would actually land on disk and refuses one
-  // that escapes the vault or hits a restricted segment. We run it both before MCPVault's
-  // write (a pre-existing malicious symlink) and after it (a component swapped
-  // mid-transaction), so the two callers must stay identical — a shared helper is the only
-  // way they can't drift. `swapContext` tails the message so the post-write caller can name
-  // the race without duplicating the loop.
+  // that escapes `root` or hits a restricted segment. We run it against the staged clone
+  // before the delegated write and against the live vault after it, so the two callers must
+  // stay identical — a shared helper is the only way they can't drift. `root`/`realRoot`
+  // parameterize which tree is being judged (the clone vs. the live vault); `swapContext`
+  // tails the message so the post-write caller can name the race without duplicating the loop.
   const assertWriteDestinationsContained = async (
     args: Record<string, unknown>,
     swapContext: string,
+    root: string,
+    realRoot: string,
   ): Promise<void> => {
     for (const key of ['path', 'oldPath', 'newPath']) {
       const value = args[key];
       if (typeof value !== 'string') continue;
-      const destination = await resolveWriteDestination(vaultPath, value);
+      const destination = await resolveWriteDestination(root, value);
       if (destination === undefined) {
         throw new InnerToolError(`${value}: symlink chain is too deep or cyclic${swapContext}`);
       }
-      const withinVault = destination.startsWith(realVaultPath + sep);
+      const withinVault = destination.startsWith(realRoot + sep);
       const reason = withinVault
-        ? forbiddenPathReason(relative(realVaultPath, destination))
+        ? forbiddenPathReason(relative(realRoot, destination))
         : 'refusing to follow a symlink outside the vault';
       if (reason) {
         throw new InnerToolError(`${value}: ${reason}${swapContext}`);
@@ -343,32 +346,64 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     }
     let result: CallToolResult | undefined;
     const sha = await transactor.transact(commitMessageFor(name, args), async () => {
-      // MCPVault's own filter only judges the literal argument string, so a symlink whose
-      // name looks unremarkable (e.g. "Linked.md") can still resolve onto a restricted
-      // path or outside the vault once followed — and MCPVault follows a pre-existing
-      // symlink itself, so this runs before callInner: by the time an escape is visible in
-      // the *result*, the write (or delete) has already happened. It runs inside the
-      // transaction (after fetch/fast-forward), so it also covers a symlink that only just
-      // arrived from the remote (mirrors appendTool's ordering below).
-      //
-      // Residual window, stated honestly: MCPVault does the final path resolution for
-      // delegated writes, so a local attacker swapping a symlink component between this
-      // check and MCPVault's own resolution can still redirect that one write. The
-      // post-write re-check below narrows it but can't fully close it, because closing it
-      // needs dirfd-relative I/O (openat) that Node's fs API doesn't expose without a
-      // native dependency. That attacker already has local write access as this uid, so
-      // there's no privilege gain — while the remote-planted-symlink attack a git-synced
-      // vault actually faces has no race at all and stays fully covered by these
-      // in-transaction checks.
-      await assertWriteDestinationsContained(args, '');
-      result = await callInner(name, args);
-      if (result.isError) {
-        throw new InnerToolError(textOf(result));
+      // Delegated writes never touch the live vault directly. We clone the fast-forwarded
+      // worktree into an ephemeral 0700 dir, run a throwaway MCPVault against the clone,
+      // then copy only the changed bytes back through fd-pinned writes. This narrows the
+      // delegated-write race from the long-lived vault path down to a stage dir an attacker
+      // must both find and tamper within this transaction's lifetime: a remote-planted
+      // symlink is raceless and stays refused against the clone below; the only real-vault
+      // mutations flow through applyCloneDiff's fd-pinned writes; and a same-uid live
+      // attacker racing the stage dir remains theoretically possible, because nothing
+      // userland stops a same-uid attacker. In-vault symlink semantics are unchanged — the
+      // clone preserves links verbatim, so a delegated write through one resolves onto its
+      // target exactly as before.
+      const stage = await cloneWorktree(vaultPath);
+      try {
+        const realStage = await realpath(stage);
+        // Refuse an escaping symlink against the CLONE — same resolution as the live vault,
+        // minus the live-swap exposure on the long-lived path. Runs after fetch/fast-forward,
+        // so it also covers a symlink that only just arrived from the remote.
+        await assertWriteDestinationsContained(args, '', stage, realStage);
+
+        const before = await manifestOf(stage);
+        // Fresh throwaway MCPVault bound to the clone; the long-lived inner instance keeps
+        // serving reads. Close client+server even if one rejects, surfacing the first
+        // failure — but only when the call left no result to return (mirrors close()).
+        const stageServer = createMcpVaultServer(stage, {
+          name: 'mcpvault-stage',
+          version: VERSION,
+        });
+        const [stageClientTransport, stageServerTransport] = InMemoryTransport.createLinkedPair();
+        await stageServer.connect(stageServerTransport);
+        const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
+        await stageClient.connect(stageClientTransport);
+        try {
+          result = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
+        } finally {
+          const closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
+          const failed = closes.find((r) => r.status === 'rejected');
+          if (failed && result === undefined) {
+            throw (failed as PromiseRejectedResult).reason;
+          }
+        }
+        if (result.isError) {
+          throw new InnerToolError(textOf(result));
+        }
+
+        const after = await manifestOf(stage);
+        await applyCloneDiff(vaultPath, realVaultPath, stage, before, after);
+
+        // Defense in depth: re-resolve the arg paths against the LIVE vault after applying,
+        // catching a component swapped on the real path mid-transaction.
+        await assertWriteDestinationsContained(
+          args,
+          ' (concurrent path swap detected)',
+          vaultPath,
+          realVaultPath,
+        );
+      } finally {
+        await rm(stage, { recursive: true, force: true });
       }
-      // Re-resolve after MCPVault's write: a component swapped mid-transaction would have
-      // let a redirected write land, so catching it here rolls the transaction back
-      // instead of committing and pushing a tampered tree.
-      await assertWriteDestinationsContained(args, ' (concurrent path swap detected)');
     });
     if (!result) {
       throw new Error(`${name}: transact() resolved without running mutate`);
