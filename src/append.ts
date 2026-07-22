@@ -1,6 +1,9 @@
 // The optional trailing group strips a closed-ATX marker ("## Log ##"), which needs
-// whitespace before it — a bare trailing # ("## C#") is part of the name.
-const HEADING = /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
+// whitespace before it — a bare trailing # ("## C#") is part of the name. The leading
+// " {0,3}" mirrors FENCE: CommonMark allows an ATX heading indented 0-3 spaces, while 4+
+// is indented code — matching that here keeps an indented existing heading from being
+// missed and silently duplicated.
+const HEADING = /^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 // A fence marker may be indented 0-3 spaces per CommonMark; 4+ spaces (or any leading
 // tab) is an indented code block, not a fence, so we match the raw line and cap the
 // leading run at three spaces rather than trimming — trimming would let "    ```" or a

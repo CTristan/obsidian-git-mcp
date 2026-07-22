@@ -307,6 +307,22 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('recognizes an existing heading indented up to three spaces', () => {
+    // CommonMark allows an ATX heading indented 0-3 spaces, so it must append into the
+    // existing section rather than duplicate it un-indented at the end.
+    const note = '# T\n\n  ## Log\n\n- one\n';
+    expect(appendToSection(note, 'Log', '- two')).toBe('# T\n\n  ## Log\n\n- one\n- two\n');
+  });
+
+  it('treats a four-space-indented heading as code, not a section', () => {
+    // 4+ spaces is an indented code block, not a heading — so no "Log" section exists and
+    // one is created at the end.
+    const note = '# T\n\n    ## Log\n\n- one\n';
+    expect(appendToSection(note, 'Log', '- two')).toBe(
+      '# T\n\n    ## Log\n\n- one\n\n## Log\n\n- two\n',
+    );
+  });
+
   it('does not prepend blank lines when creating a section in an empty note', () => {
     // First-use case: an empty (or whitespace-only) note must start with the new heading,
     // not two blank lines before it.
