@@ -2,11 +2,11 @@
 #
 # This repository's conventions live in human-first docs (README.md + CONTRIBUTING.md); these
 # patterns tell CodeRabbit to apply them as review criteria. They are ADDED on top of
-# CodeRabbit's defaults (which already include **/CLAUDE.md and .github/copilot-instructions.md).
+# CodeRabbit's defaults, which don't cover either file.
 #
-# README.md and CONTRIBUTING.md are listed explicitly because CodeRabbit reads guideline files
-# literally and does NOT expand CLAUDE.md's @imports. Exact root paths (not **/README.md) avoid
-# matching nested committed READMEs.
+# README.md and CONTRIBUTING.md are listed explicitly because CodeRabbit only reads the
+# guideline files it's told about. Exact root paths (not **/README.md) avoid matching nested
+# committed READMEs.
 
 # Inherit organization-level UI settings (e.g. the review profile) for any field this file
 # omits. Without this, a present .coderabbit.yaml pins every unspecified field to its schema
