@@ -86,4 +86,13 @@ describe('wrapper-added tools', () => {
     expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
     expect(textOf(res)).toContain('Seed vault');
   });
+
+  it('list_recent_changes clamps an explicit limit of 0 to the documented minimum of 1', async () => {
+    await callTool(srv.client, 'write_note', { path: 'Inbox/Newest.md', content: '# Newest\n' });
+    const res = await callTool(srv.client, 'list_recent_changes', { limit: 0 });
+    expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
+    const lines = textOf(res).trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('Inbox/Newest.md');
+  });
 });

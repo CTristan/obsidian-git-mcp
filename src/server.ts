@@ -408,7 +408,10 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return textResult(JSON.stringify(await transactor.status(), null, 2));
       }
       if (name === 'list_recent_changes') {
-        const limit = Math.trunc(Math.min(Math.max(Number(args['limit'] ?? 20) || 20, 1), 200));
+        const rawLimit = Number(args['limit'] ?? 20);
+        const limit = Math.trunc(
+          Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 20, 1), 200),
+        );
         const path = stringArg(args, 'path', undefined);
         if (path !== undefined) {
           const reason = forbiddenPathReason(path);

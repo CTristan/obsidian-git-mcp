@@ -24,7 +24,11 @@ export function validateNoteContent(path: string, content: string): void {
     }
   }
   try {
-    matter(content);
+    // gray-matter caches by content string, but writes the cache entry before parsing
+    // completes — a failed parse leaves an empty-data object cached under that string,
+    // so a later call with byte-identical malformed content would silently "succeed."
+    // Passing an options object (even empty) opts out of that cache entirely.
+    matter(content, {});
   } catch (err) {
     throw new ValidationError(
       `${path}: frontmatter YAML does not parse: ${(err as Error).message}`,

@@ -38,6 +38,15 @@ describe('destructive tools', () => {
     expect(move.isError).toBe(true);
     expect(textOf(move).toLowerCase()).toContain('disabled');
 
+    const moveFile = await callTool(srv.client, 'move_file', {
+      oldPath: 'Inbox/Beta.md',
+      newPath: 'Archive/Beta.md',
+      confirmOldPath: 'Inbox/Beta.md',
+      confirmNewPath: 'Archive/Beta.md',
+    });
+    expect(moveFile.isError).toBe(true);
+    expect(textOf(moveFile).toLowerCase()).toContain('disabled');
+
     // The note is still on the remote, untouched.
     expect(await git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).toContain('squirrels');
   });
@@ -54,6 +63,39 @@ describe('destructive tools', () => {
     expect(res.isError).toBeFalsy();
 
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
+    await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
+  it('move_file works when destructive tools are enabled', async () => {
+    srv = await startServer(fx, { allowDestructive: true });
+    const { tools } = await srv.client.listTools();
+    expect(tools.map((t) => t.name)).toContain('move_file');
+
+    const res = await callTool(srv.client, 'move_file', {
+      oldPath: 'Inbox/Beta.md',
+      newPath: 'Archive/Beta.md',
+      confirmOldPath: 'Inbox/Beta.md',
+      confirmNewPath: 'Archive/Beta.md',
+    });
+    expect(res.isError).toBeFalsy();
+
+    expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
+    await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
+  it('delete_note works when destructive tools are enabled', async () => {
+    srv = await startServer(fx, { allowDestructive: true });
+    const { tools } = await srv.client.listTools();
+    expect(tools.map((t) => t.name)).toContain('delete_note');
+
+    const res = await callTool(srv.client, 'delete_note', {
+      path: 'Inbox/Beta.md',
+      confirmPath: 'Inbox/Beta.md',
+    });
+    expect(res.isError).toBeFalsy();
+
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });

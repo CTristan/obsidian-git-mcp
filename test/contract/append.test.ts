@@ -98,6 +98,7 @@ describe('append_to_section', () => {
   });
 
   it('refuses a missing note instead of inventing one', async () => {
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'append_to_section', {
       path: 'Nope/Missing.md',
       heading: 'X',
@@ -105,5 +106,6 @@ describe('append_to_section', () => {
     });
     expect(res.isError).toBe(true);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await fx.bareHead()).toBe(preRemote);
   });
 });

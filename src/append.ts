@@ -6,11 +6,28 @@ const FENCE = /^(`{3,}|~{3,})/;
 // A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
 // line inside a ``` example); both scans below need to ignore those, so this returns,
 // per line, whether it sits inside an (unclosed) fence.
+//
+// Per CommonMark, a fence opened with a run of N backticks (or tildes) is closed only
+// by a line whose leading run is the same character and at least N long — a narrower or
+// different-character run inside the fence (e.g. a 3-backtick line documenting fence
+// syntax inside a 4-backtick fence) must not close it.
 function fenceMask(lines: readonly string[]): boolean[] {
   let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
   return lines.map((line) => {
     const wasFenced = inFence;
-    if (FENCE.test(line.trim())) inFence = !inFence;
+    const m = FENCE.exec(line.trim());
+    if (m) {
+      const marker = m[1]!;
+      if (!inFence) {
+        inFence = true;
+        fenceChar = marker[0]!;
+        fenceLen = marker.length;
+      } else if (marker[0] === fenceChar && marker.length >= fenceLen) {
+        inFence = false;
+      }
+    }
     return wasFenced;
   });
 }

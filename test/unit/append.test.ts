@@ -93,4 +93,85 @@ describe('appendToSection', () => {
     ].join('\n');
     expect(appendToSection(note, 'Log', '- started')).toBe(`${note}\n## Log\n\n- started\n`);
   });
+
+  it('keeps a wider fence open across a narrower inner run of the same marker', () => {
+    // A 4-backtick fence is closed only by another run of 4+ backticks — a 3-backtick
+    // line inside it (e.g. documenting the fence syntax itself) must not close it, so
+    // the "## Fake" line it contains stays masked instead of ending the "Log" section.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '````',
+      '```',
+      '## Fake',
+      '````',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '````',
+      '```',
+      '## Fake',
+      '````',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
+  it('keeps a wider tilde fence open across a narrower inner run of the same marker', () => {
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '~~~~',
+      '~~~',
+      '## Fake',
+      '~~~~',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '~~~~',
+      '~~~',
+      '## Fake',
+      '~~~~',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
 });

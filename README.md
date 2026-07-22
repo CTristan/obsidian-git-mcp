@@ -18,7 +18,7 @@ My vault's `main` branch on GitHub is the canonical copy of my second brain, and
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — `corepack enable pnpm` — or use pnpm's own installer at <https://pnpm.io/installation>:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git
