@@ -82,4 +82,20 @@ describe('applyCloneDiff symlink safety', () => {
     ).rejects.toThrow(/symlink/);
     expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
   });
+
+  it('deletes a legitimate pre-existing symlink entry', async () => {
+    // manifestOf records any pre-existing vault symlink with isSymlink: true. Removing one
+    // in the clone must actually delete the in-vault link, not refuse it as if it were an
+    // escape attempt.
+    await symlink(outside, join(vaultPath, 'Link.md'));
+
+    const before: Manifest = new Map([
+      ['Link.md', { size: 0n, mtimeNs: 1n, ino: 1n, isSymlink: true }],
+    ]);
+    const after: Manifest = new Map();
+
+    await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
+
+    expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
+  });
 });

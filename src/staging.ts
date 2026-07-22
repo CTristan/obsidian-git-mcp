@@ -244,9 +244,12 @@ async function writeIntoVault(
 /**
  * Delete rel's target from vaultPath without ever following a symlink standing in for a
  * parent directory. Walks each parent segment exactly like mkdirNoFollow — refusing a
- * symlink or non-directory anywhere in the chain — then confirms the fully resolved path
+ * symlink or non-directory anywhere in the chain — then confirms the resolved *parent*
  * still lands at the canonical vault location before unlinking, closing the same
- * swapped-parent window openPinnedHandle closes for writes. unlink() itself never follows
+ * swapped-parent window openPinnedHandle closes for writes. The check deliberately stops at
+ * the parent: realpath(target) would follow rel's own symlink to its target, which is never
+ * the same as rel's own canonical path, so resolving the entry itself would make deleting
+ * any legitimate pre-existing vault symlink fail every time. unlink() itself never follows
  * a symlink at the final segment, so a deleted entry that was a symlink drops only the
  * in-vault link, never whatever it pointed at.
  */
@@ -255,6 +258,11 @@ async function unlinkNoFollow(
   realVaultPath: string,
   rel: string,
 ): Promise<void> {
+  // Reject a literal ".." segment at this layer too, mirroring mkdirNoFollow's independent
+  // guarantee — see the comment there for why upstream discipline alone isn't trusted.
+  if (rel.split('/').includes('..')) {
+    throw new Error(`${rel}: refusing to delete through a path-traversal segment`);
+  }
   let cur = vaultPath;
   for (const segment of dirname(rel).split('/')) {
     if (segment === '' || segment === '.') continue;
@@ -265,8 +273,8 @@ async function unlinkNoFollow(
     }
   }
   const target = join(vaultPath, rel);
-  const resolved = await realpath(target);
-  if (resolved !== join(realVaultPath, rel)) {
+  const parentReal = await realpath(dirname(target));
+  if (parentReal !== dirname(join(realVaultPath, rel))) {
     throw new Error(`${rel}: refusing to delete — path resolved outside the vault`);
   }
   await unlink(target);

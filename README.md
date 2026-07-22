@@ -30,7 +30,13 @@ The build does not put `obsidian-git-mcp` on `PATH`. Run `pnpm link --global` fr
 
 ## Running it
 
-Point the server at a normal git clone of your vault, never your live Obsidian directory. The checkout is the server's workspace: on startup it discards any leftover crash debris — uncommitted edits and unpushed commits alike — by hard-resetting to the remote, because a write that never reached the remote never counted. Aim it at your live vault and that reset takes your local-only notes with it.
+Point the server at a normal git clone of your vault, never your live Obsidian directory. Clone the vault's remote to make that checkout:
+
+```sh
+git clone <your-vault-remote> /path/to/vault-checkout
+```
+
+The checkout is the server's workspace: on startup it discards any leftover crash debris — uncommitted edits and unpushed commits alike — by hard-resetting to the remote, because a write that never reached the remote never counted. Aim it at your live vault and that reset takes your local-only notes with it.
 
 ```sh
 OGM_COLLABORATOR="Your Name" node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout

@@ -29,7 +29,7 @@ describe('append_to_section', () => {
       text: '- Buy the dip.',
     });
     expect(res.isError).toBeFalsy();
-    expect(commitShaOf(res)).toMatch(/^[0-9a-f]{40}$/);
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const expected = SEED_NOTES[ALPHA]!.replace('- Ship early.\n', '- Ship early.\n- Buy the dip.\n');
     expect(await remoteAlpha(fx)).toBe(expected);
@@ -42,6 +42,7 @@ describe('append_to_section', () => {
       text: 'Still in flight.',
     });
     expect(res.isError).toBeFalsy();
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const expected = SEED_NOTES[ALPHA]!.replace(
       'Alpha is in flight.\n',
@@ -57,6 +58,7 @@ describe('append_to_section', () => {
       text: '- Started.',
     });
     expect(res.isError).toBeFalsy();
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const expected = `${SEED_NOTES[ALPHA]!}\n## Log\n\n- Started.\n`;
     expect(await remoteAlpha(fx)).toBe(expected);
@@ -72,6 +74,7 @@ describe('append_to_section', () => {
       text: '- two',
     });
     expect(res.isError).toBeFalsy();
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     expect(await fx.remoteFile('Inbox/Windows.md')).toBe(
       '# Win\r\n\r\n## Log\r\n\r\n- one\r\n- two\r\n',

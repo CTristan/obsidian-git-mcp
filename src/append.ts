@@ -1,9 +1,12 @@
-// The optional trailing group strips a closed-ATX marker ("## Log ##"), which needs
-// whitespace before it — a bare trailing # ("## C#") is part of the name. The leading
-// " {0,3}" mirrors FENCE: CommonMark allows an ATX heading indented 0-3 spaces, while 4+
-// is indented code — matching that here keeps an indented existing heading from being
-// missed and silently duplicated.
-const HEADING = /^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
+// The title group is optional so a bare "##" — a valid, title-less ATX heading per
+// CommonMark — still matches as a heading/boundary; callers normalize a missing capture
+// to '' rather than treating the line as non-heading text. The optional trailing group
+// strips a closed-ATX marker ("## Log ##"), which needs whitespace before it — a bare
+// trailing # ("## C#") is part of the name. The leading " {0,3}" mirrors FENCE:
+// CommonMark allows an ATX heading indented 0-3 spaces, while 4+ is indented code —
+// matching that here keeps an indented existing heading from being missed and silently
+// duplicated.
+const HEADING = /^ {0,3}(#{1,6})(?:\s+(.+?))?(?:\s+#+)?\s*$/;
 // A fence marker may be indented 0-3 spaces per CommonMark; 4+ spaces (or any leading
 // tab) is an indented code block, not a fence, so we match the raw line and cap the
 // leading run at three spaces rather than trimming — trimming would let "    ```" or a
@@ -18,11 +21,14 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 // by a line whose leading run is the same character and at least N long — a narrower or
 // different-character run inside the fence (e.g. a 3-backtick line documenting fence
 // syntax inside a 4-backtick fence) must not close it.
-function fenceMask(lines: readonly string[]): { mask: boolean[]; endsOpen: boolean } {
+function fenceMask(
+  lines: readonly string[],
+): { mask: boolean[]; endsOpen: boolean; openFenceAt: number } {
   let inFence = false;
   let fenceChar = '';
   let fenceLen = 0;
-  const mask = lines.map((line) => {
+  let openFenceAt = -1;
+  const mask = lines.map((line, i) => {
     // Capture inFence BEFORE this line toggles it, which deliberately leaves the opening
     // delimiter unmasked (it wasn't inside a fence yet) but the closing delimiter masked
     // (it still was). The insert scan relies on that asymmetry — it appends after the
@@ -35,6 +41,7 @@ function fenceMask(lines: readonly string[]): { mask: boolean[]; endsOpen: boole
         inFence = true;
         fenceChar = marker[0]!;
         fenceLen = marker.length;
+        openFenceAt = i;
       } else if (
         marker[0] === fenceChar &&
         marker.length >= fenceLen &&
@@ -50,7 +57,10 @@ function fenceMask(lines: readonly string[]): { mask: boolean[]; endsOpen: boole
   });
   // endsOpen reports whether the note finishes inside an unclosed fence — the signal the
   // insert scan needs to avoid dropping an append into a code block that never terminates.
-  return { mask, endsOpen: inFence };
+  // openFenceAt is that fence's opening line (meaningful only when endsOpen is true) — an
+  // unclosed fence consumes only the remainder of the note from its opener onward, so the
+  // insert scan still needs to look for real content before that point.
+  return { mask, endsOpen: inFence, openFenceAt };
 }
 
 /**
@@ -65,7 +75,7 @@ export function appendToSection(content: string, heading: string, text: string):
   if (
     wanted === '' ||
     /[\r\n]/.test(wanted) ||
-    HEADING.exec(`## ${wanted}`)?.[2] !== wanted
+    (HEADING.exec(`## ${wanted}`)?.[2] ?? '') !== wanted
   ) {
     throw new Error('heading must be a non-empty single line');
   }
@@ -73,14 +83,14 @@ export function appendToSection(content: string, heading: string, text: string):
   // note would leave it mixed.
   const useCRLF = content.includes('\r\n');
   const lines = content.split('\n');
-  const { mask: fenced, endsOpen } = fenceMask(lines);
+  const { mask: fenced, endsOpen, openFenceAt } = fenceMask(lines);
 
   let start = -1;
   let level = 0;
   for (let i = 0; i < lines.length; i++) {
     if (fenced[i]) continue;
     const m = HEADING.exec(lines[i]!);
-    if (m && m[2] === wanted) {
+    if (m && (m[2] ?? '') === wanted) {
       start = i;
       level = m[1]!.length;
       break;
@@ -108,16 +118,18 @@ export function appendToSection(content: string, heading: string, text: string):
   }
 
   let insertAt = start;
-  // When the section runs to end-of-file inside a fence that never closes, every trailing
-  // line is code-block content; the backward scan below would land the append among those
-  // lines and swallow it. Insert right after the heading instead. A closed fence doesn't
-  // hit this — its closing delimiter is a real line the scan correctly appends after.
-  if (!(end === lines.length && endsOpen)) {
-    for (let i = end - 1; i > start; i--) {
-      if (lines[i]!.trim() !== '') {
-        insertAt = i;
-        break;
-      }
+  // When the section runs to end-of-file inside a fence that never closes, only the lines
+  // from that fence's opener onward are code-block content — an unclosed CommonMark fence
+  // consumes just the remainder after its opener, not anything before it. Bound the scan
+  // there instead of at `end` so real content preceding the fence (e.g. a list) is still
+  // found; falling back to the heading (the initial `insertAt`) when nothing precedes the
+  // opener. A closed fence doesn't hit this — its closing delimiter is a real line the
+  // unbounded scan correctly appends after.
+  const scanFrom = end === lines.length && endsOpen ? openFenceAt - 1 : end - 1;
+  for (let i = scanFrom; i > start; i--) {
+    if (lines[i]!.trim() !== '') {
+      insertAt = i;
+      break;
     }
   }
 

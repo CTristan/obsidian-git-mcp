@@ -99,9 +99,12 @@ describe('wrapper-added tools', () => {
   });
 
   it('list_recent_changes truncates a fractional limit instead of erroring', async () => {
+    await callTool(srv.client, 'write_note', { path: 'Inbox/A.md', content: '# A\n' });
+    await callTool(srv.client, 'write_note', { path: 'Inbox/B.md', content: '# B\n' });
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 2.7 });
     expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
-    expect(textOf(res)).toContain('Seed vault');
+    // 2.7 floors to 2, so exactly the two newest commits are returned.
+    expect(textOf(res).trim().split('\n')).toHaveLength(2);
   });
 
   it('list_recent_changes clamps an explicit limit of 0 to the documented minimum of 1', async () => {

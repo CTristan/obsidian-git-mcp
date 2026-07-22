@@ -13,6 +13,14 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'C#', '- two')).toBe('# T\n\n## C#\n\n- one\n- two\n');
   });
 
+  it('treats an empty ATX heading as a section boundary', () => {
+    // A bare "##" (no title) is a valid CommonMark heading. Missing it as a boundary
+    // means the "Log" section's scan runs past it and appends inside the following,
+    // unlabeled section instead of after "Log"'s own last line.
+    const note = '## Log\n- one\n##\n- other\n';
+    expect(appendToSection(note, 'Log', '- two')).toBe('## Log\n- one\n- two\n##\n- other\n');
+  });
+
   it('rejects an empty heading instead of creating an unfindable "## " section', () => {
     const note = '# T\n\n- one\n';
     expect(() => appendToSection(note, '', '- two')).toThrow(/non-empty single line/);
@@ -346,6 +354,26 @@ describe('appendToSection', () => {
     // than inside the open code block.
     const note = ['# T', '', '## Log', '', '```', 'code line', ''].join('\n');
     const expected = ['# T', '', '## Log', '- added', '', '```', 'code line', ''].join('\n');
+    expect(appendToSection(note, 'Log', '- added')).toBe(expected);
+  });
+
+  it('appends after real content that precedes a fence that never closes', () => {
+    // An unclosed fence only consumes the remainder of the note from its own opener
+    // onward — content before the opener (here "- one") is still real prose, so the
+    // append must land after it rather than reordered ahead of it at the heading.
+    const note = ['# T', '', '## Log', '', '- one', '', '```', 'code line', ''].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '- one',
+      '- added',
+      '',
+      '```',
+      'code line',
+      '',
+    ].join('\n');
     expect(appendToSection(note, 'Log', '- added')).toBe(expected);
   });
 });
