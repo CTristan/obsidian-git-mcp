@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { open, readFile, unlink } from 'node:fs/promises';
+import { lstat, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGit, type GitOptions } from './git.js';
 
@@ -212,18 +212,25 @@ export class Transactor {
   }
 
   /**
-   * Content fingerprint of a fixed set of paths, order-independent. Git status can never
+   * Change signal for a fixed set of paths, order-independent. Git status can never
    * reveal a content-only edit to a path that's already ignored (ignored paths are
    * invisible to it, not merely excluded from one output), so the only way to notice a
-   * mutation that only touched already-ignored files is to hash them ourselves before
-   * and after.
+   * mutation that only touched already-ignored files is to compare them ourselves before
+   * and after. Fingerprints by stat (size + mtimeMs) rather than by content: a vault that
+   * gitignores .obsidian/ can hold multi-MB plugin/workspace/cache data, and this digest
+   * runs on every transact(), so hashing full file contents would scale write latency to
+   * the size of that tree. A content rewrite always updates mtime (and usually size), so
+   * this still catches the hidden-write case; the accepted trade-off is a same-size,
+   * same-mtimeMs content swap landing within one stat call of the original, which a full
+   * content hash would catch but only by paying that read on every single write.
    */
   private async ignoredFingerprint(relPaths: readonly string[]): Promise<string> {
     const hash = createHash('sha1');
     for (const relPath of [...relPaths].sort()) {
       hash.update(relPath).update('\0');
       try {
-        hash.update(await readFile(join(this.cfg.vaultPath, relPath)));
+        const stats = await lstat(join(this.cfg.vaultPath, relPath));
+        hash.update(`${stats.size}\0${stats.mtimeMs}`);
       } catch {
         // Vanished since being listed; its absence is still folded into the digest via
         // the path-only update above, so a delete-then-recreate still changes the hash.

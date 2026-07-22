@@ -17,14 +17,21 @@ function fenceMask(lines: readonly string[]): boolean[] {
   let fenceLen = 0;
   return lines.map((line) => {
     const wasFenced = inFence;
-    const m = FENCE.exec(line.trim());
+    const trimmed = line.trim();
+    const m = FENCE.exec(trimmed);
     if (m) {
       const marker = m[1]!;
       if (!inFence) {
         inFence = true;
         fenceChar = marker[0]!;
         fenceLen = marker.length;
-      } else if (marker[0] === fenceChar && marker.length >= fenceLen) {
+      } else if (
+        marker[0] === fenceChar &&
+        marker.length >= fenceLen &&
+        // A closing fence marker may be followed only by whitespace (CommonMark) — a
+        // trailing info string like "``` not-a-close" leaves the fence open.
+        trimmed.slice(marker.length).trim() === ''
+      ) {
         inFence = false;
       }
     }

@@ -7,7 +7,8 @@ function fail(message: string): never {
   process.exit(2);
 }
 
-const vaultPath = process.argv[2] ?? fail('usage: obsidian-git-mcp <vault-checkout-path>');
+const vaultPath =
+  process.argv[2]?.trim() || fail('usage: obsidian-git-mcp <vault-checkout-path>');
 const collaborator =
   process.env['OGM_COLLABORATOR']?.trim() ||
   fail('OGM_COLLABORATOR is required — it becomes the git author of every write');

@@ -136,6 +136,48 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('does not close a fence on a marker line followed by non-whitespace text', () => {
+    // Per CommonMark, a closing fence marker may be followed only by whitespace — a line
+    // like "``` not-a-close" doesn't close the fence, so the "## Fake" line after it must
+    // stay masked instead of ending the "Log" section early.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '``` not-a-close',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '``` not-a-close',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
   it('keeps a wider tilde fence open across a narrower inner run of the same marker', () => {
     const note = [
       '# T',

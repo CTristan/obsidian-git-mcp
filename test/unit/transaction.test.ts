@@ -1,8 +1,11 @@
-import { writeFile } from 'node:fs/promises';
+import * as fsPromises from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
 import { LockError, Transactor } from '../../src/transaction.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 describe('Transactor.status', () => {
   let fx: Fixture;
@@ -103,5 +106,55 @@ describe('Transactor.reconcileAtStartup', () => {
     } finally {
       killSpy.mockRestore();
     }
+  });
+});
+
+describe('Transactor ignored-file change signal', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('fingerprints already-ignored files by stat, never by reading their content', async () => {
+    // Regression guard for the perf fix: an ignored tree (e.g. .obsidian/) can hold
+    // multi-MB files, and ignoredFingerprint() runs twice per transact(), so it must
+    // never read file contents — only stat metadata.
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+    // Sync .gitignore into serverDir before creating the ignored file: transact() only
+    // fetches/merges once it runs, and until .gitignore lands locally the file below
+    // would be untracked (dirty), not ignored.
+    await git(['fetch', 'origin', 'main'], fx.serverDir);
+    await git(['merge', '--ff-only', 'origin/main'], fx.serverDir);
+    await mkdir(join(fx.serverDir, 'private'), { recursive: true });
+    const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
+    await writeFile(ignoredPath, 'x'.repeat(1024));
+
+    const transactor = new Transactor({
+      vaultPath: fx.serverDir,
+      branch: 'main',
+      remote: 'origin',
+      collaborator: { name: 'Test Agent', email: 'agent@test.local' },
+      service: { name: 'obsidian-git-mcp', email: 'service@obsidian-git-mcp.local' },
+      readFreshnessMs: 0,
+      maxPushRetries: 0,
+      validateChangedFile: async () => {},
+    });
+
+    const readFileSpy = vi.mocked(fsPromises.readFile);
+    const lstatSpy = vi.mocked(fsPromises.lstat);
+    readFileSpy.mockClear();
+    lstatSpy.mockClear();
+
+    await transactor.transact('touch a tracked file', async () => {
+      await writeFile(join(fx.serverDir, 'Inbox', 'Beta.md'), '# Beta\n\nupdated\n');
+    });
+
+    expect(lstatSpy.mock.calls.some(([path]) => path === ignoredPath)).toBe(true);
+    expect(readFileSpy.mock.calls.some(([path]) => path === ignoredPath)).toBe(false);
   });
 });

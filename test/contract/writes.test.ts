@@ -59,6 +59,7 @@ describe('writes', () => {
       newString: 'Alpha has shipped.',
     });
     expect(res.isError).toBeFalsy();
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const expected = SEED_NOTES['Projects/Alpha.md']!.replace(
       'Alpha is in flight.',
@@ -74,6 +75,7 @@ describe('writes', () => {
       merge: true,
     });
     expect(res.isError).toBeFalsy();
+    expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const remote = await fx.remoteFile('Projects/Alpha.md');
     const seedBody = SEED_NOTES['Projects/Alpha.md']!.split('---\n')[2]!;

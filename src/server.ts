@@ -18,6 +18,15 @@ import { validateNoteContent, ValidationError } from './validate.js';
 
 const VERSION = '0.1.0';
 
+// Every extension MCPVault's own PathFilter treats as a writable note (see its
+// allowedExtensions), so a file this wrapper must validate matches exactly what MCPVault
+// will actually let through — not just the shorter/common one.
+const NOTE_EXTENSIONS = ['.md', '.markdown'];
+
+function isNoteFile(path: string): boolean {
+  return NOTE_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+
 // MCPVault's 15 tools, classified by effect. Anything unknown is refused, because a
 // future MCPVault tool we haven't classified must not silently bypass the transaction
 // wrapper.
@@ -261,7 +270,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (reason) {
         throw new ValidationError(`${relPath}: ${reason}`);
       }
-      if (relPath.endsWith('.md')) {
+      if (isNoteFile(relPath)) {
         let content: string;
         try {
           content = await readFile(resolve(vaultPath, relPath), 'utf8');

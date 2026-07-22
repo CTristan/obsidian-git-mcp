@@ -44,6 +44,26 @@ describe('transaction safety', () => {
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
   });
 
+  it('a .markdown write containing conflict markers is rejected and rolled back', async () => {
+    // .markdown is as much a note extension as .md (MCPVault's PathFilter accepts both),
+    // so validateChangedFile must cover it too, not just the shorter extension.
+    srv = await startServer(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await fx.bareHead();
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/Bad.markdown',
+      content: '# Bad\n\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('conflict marker');
+
+    const postRemote = await fx.bareHead();
+    expect(postRemote).toBe(preRemote);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
   it('broken frontmatter YAML never reaches the remote', async () => {
     srv = await startServer(fx);
     const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);

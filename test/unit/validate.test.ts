@@ -23,6 +23,28 @@ describe('validateNoteContent', () => {
     );
   });
 
+  it('rejects a begin conflict marker longer than seven characters', () => {
+    expect(() => validateNoteContent('Note.md', '<<<<<<<< HEAD\nours\n')).toThrow(
+      ValidationError,
+    );
+    expect(() => validateNoteContent('Note.md', '<<<<<<<< HEAD\nours\n')).toThrow(
+      /conflict markers/,
+    );
+  });
+
+  it('rejects an end conflict marker longer than seven characters', () => {
+    expect(() => validateNoteContent('Note.md', 'theirs\n>>>>>>>> branch-name\n')).toThrow(
+      ValidationError,
+    );
+    expect(() => validateNoteContent('Note.md', 'theirs\n>>>>>>>> branch-name\n')).toThrow(
+      /conflict markers/,
+    );
+  });
+
+  it('does not reject seven marker characters followed by non-whitespace, non-EOL text', () => {
+    expect(() => validateNoteContent('Note.md', '<<<<<<<not-a-marker\n')).not.toThrow();
+  });
+
   it('does not reject a bare ======= line, since it is legal setext-heading markdown', () => {
     expect(() =>
       validateNoteContent('Note.md', 'Heading\n=======\n\nBody text.\n'),

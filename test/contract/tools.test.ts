@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
-import { callTool, startServer, textOf, type TestServer } from '../helpers.js';
+import { callTool, commitShaOf, startServer, textOf, type TestServer } from '../helpers.js';
 
 describe('wrapper-added tools', () => {
   let fx: Fixture;
@@ -62,12 +62,29 @@ describe('wrapper-added tools', () => {
       ['get_notes_info', { paths: ['Projects/Alpha.md'] }],
       ['get_vault_stats', {}],
       ['list_all_tags', {}],
-      ['manage_tags', { path: 'Projects/Alpha.md', operation: 'add', tags: ['spike'] }],
     ];
     for (const [name, args] of calls) {
       const res = await callTool(srv.client, name, args);
       expect(res.isError, `${name} failed: ${textOf(res)}`).toBeFalsy();
     }
+
+    const listing = await callTool(srv.client, 'list_directory', { path: 'Projects' });
+    expect(listing.isError, `list_directory failed: ${textOf(listing)}`).toBeFalsy();
+    const parsed = JSON.parse(textOf(listing)) as { files: string[]; dirs: string[] };
+    expect(parsed.files).toContain('Alpha.md');
+  });
+
+  it('manage_tags lands a pushed commit and returns its SHA', async () => {
+    const before = await fx.bareHead();
+    const res = await callTool(srv.client, 'manage_tags', {
+      path: 'Projects/Alpha.md',
+      operation: 'add',
+      tags: ['spike'],
+    });
+    expect(res.isError, `manage_tags failed: ${textOf(res)}`).toBeFalsy();
+    const after = await fx.bareHead();
+    expect(after).not.toBe(before);
+    expect(commitShaOf(res)).toBe(after);
   });
 
   it('list_recent_changes returns newest-first git history', async () => {

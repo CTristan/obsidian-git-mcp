@@ -6,7 +6,7 @@ export class ValidationError extends Error {
 
 // Only the unambiguous begin/end markers. A bare ======= line is legal markdown (a
 // setext heading underline), so flagging it alone would reject real notes.
-const CONFLICT_MARKERS = [/^<{7}( |$)/m, /^>{7}( |$)/m];
+const CONFLICT_MARKERS = [/^<{7,}(?:[ \t]|$)/m, /^>{7,}(?:[ \t]|$)/m];
 
 /**
  * Wrapper-level content validation, run on every file a transaction changed before it
