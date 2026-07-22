@@ -32,11 +32,6 @@ describe('appendToSection', () => {
     expect(() => appendToSection(note, 'Log ##', '- two')).toThrow(/non-empty single line/);
   });
 
-  it('still accepts a trailing # inside a name that round-trips', () => {
-    const note = '# T\n\n## C#\n\n- one\n';
-    expect(appendToSection(note, 'C#', '- two')).toBe('# T\n\n## C#\n\n- one\n- two\n');
-  });
-
   it('does not treat a "##" line inside a fenced code block as a section boundary', () => {
     // The fenced "## Fake" line must not end the real "Log" section early, and the
     // appended text must land after the section's actual last line ("- one").

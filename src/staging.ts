@@ -118,6 +118,33 @@ function isUnchanged(before: ManifestEntry | undefined, after: ManifestEntry): b
 }
 
 /**
+ * Create rel's parent directories under vaultPath without ever following a symlink. Plain
+ * mkdir({recursive}) would traverse a pre-existing symlinked intermediate directory and
+ * create dirs at its external target — happening BEFORE writeIntoVault's O_NOFOLLOW/realpath
+ * guards, so those never see it. We instead lstat each segment: an existing directory is
+ * descended, a missing one is created a single level at a time, and a symlink (or any
+ * non-directory) is refused. mkdir without `recursive` throws EEXIST if a segment races into
+ * existence between the lstat and the mkdir, which rolls the transaction back rather than
+ * following whatever now sits there.
+ */
+async function mkdirNoFollow(vaultPath: string, rel: string): Promise<void> {
+  let cur = vaultPath;
+  for (const segment of dirname(rel).split('/')) {
+    if (segment === '' || segment === '.') continue;
+    cur = join(cur, segment);
+    try {
+      const st = await lstat(cur);
+      if (!st.isDirectory()) {
+        throw new Error(`${rel}: refusing to write through a non-directory at ${segment}`);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      await mkdir(cur, { mode: 0o755 });
+    }
+  }
+}
+
+/**
  * Copy one changed/added clone file into the real vault through an fd-pinned write. We
  * open the target with O_NOFOLLOW (its final hop can't be a symlink under us), then
  * re-resolve and match the bound fd's inode against the resolved path before trusting it.
@@ -135,7 +162,7 @@ async function writeIntoVault(
 ): Promise<void> {
   const bytes = await readFile(join(cloneDir, rel));
   const target = join(vaultPath, rel);
-  await mkdir(dirname(target), { recursive: true });
+  await mkdirNoFollow(vaultPath, rel);
   let handle: FileHandle | undefined;
   try {
     handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o644);

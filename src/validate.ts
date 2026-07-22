@@ -16,7 +16,9 @@ const CONFLICT_MARKERS = [/^<{7,}(?:[ \t]|$)/m, /^>{7,}(?:[ \t]|$)/m];
 // the only executable-frontmatter surface and it's closed. Exact-pinned gray-matter means
 // js/javascript are the complete set of code-executing default engines to cover here.
 const refuseEngine = (lang: string) => () => {
-  throw new Error(`${lang} frontmatter is not allowed`);
+  // A ValidationError (not a plain Error) so validateNoteContent can tell a security
+  // refusal apart from a genuine YAML parse failure and report it as what it is.
+  throw new ValidationError(`${lang} frontmatter is not allowed`);
 };
 const SAFE_ENGINES = {
   js: refuseEngine('js'),
@@ -45,6 +47,12 @@ export function validateNoteContent(path: string, content: string): void {
     // Passing an options object (even empty) opts out of that cache entirely.
     matter(content, { engines: SAFE_ENGINES });
   } catch (err) {
+    // gray-matter propagates an engine's thrown error unchanged, so a refuseEngine
+    // ValidationError arrives here intact — re-label it with the path rather than
+    // mislabeling a deliberate refusal as a parse failure.
+    if (err instanceof ValidationError) {
+      throw new ValidationError(`${path}: ${err.message}`);
+    }
     throw new ValidationError(
       `${path}: frontmatter YAML does not parse: ${(err as Error).message}`,
     );

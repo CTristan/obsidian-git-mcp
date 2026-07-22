@@ -94,6 +94,8 @@ describe('validateNoteContent', () => {
     ].join('\n');
     expect(() => validateNoteContent('Note.md', payload)).toThrow(ValidationError);
     expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+    // The refusal reports what it is, not a misleading "YAML does not parse".
+    expect(() => validateNoteContent('Note.md', payload)).toThrow(/frontmatter is not allowed/);
     // The `javascript` alias reaches the same engine.
     const aliased = payload.replace('---js', '---javascript');
     expect(() => validateNoteContent('Note.md', aliased)).toThrow(ValidationError);

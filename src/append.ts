@@ -20,6 +20,10 @@ function fenceMask(lines: readonly string[]): { mask: boolean[]; endsOpen: boole
   let fenceChar = '';
   let fenceLen = 0;
   const mask = lines.map((line) => {
+    // Capture inFence BEFORE this line toggles it, which deliberately leaves the opening
+    // delimiter unmasked (it wasn't inside a fence yet) but the closing delimiter masked
+    // (it still was). The insert scan relies on that asymmetry — it appends after the
+    // closing delimiter, which lands outside the block — so don't "fix" it to be symmetric.
     const wasFenced = inFence;
     const m = FENCE.exec(line);
     if (m) {
