@@ -46,4 +46,20 @@ describe('applyCloneDiff symlink safety', () => {
     expect(existsSync(join(outside, 'new.md'))).toBe(false);
     expect(await readdir(outside)).toEqual([]);
   });
+
+  it('refuses to copy back a symlink that appeared in the diff', async () => {
+    // MCPVault never creates symlinks, so one showing up as added/changed is tampering.
+    // applyCloneDiff must refuse rather than reproduce it in the live vault.
+    await symlink(outside, join(cloneDir, 'Link.md'));
+
+    const before: Manifest = new Map();
+    const after: Manifest = new Map([
+      ['Link.md', { size: 0n, mtimeNs: 1n, ino: 1n, isSymlink: true }],
+    ]);
+
+    await expect(
+      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
+    ).rejects.toThrow(/symlink/);
+    expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
+  });
 });

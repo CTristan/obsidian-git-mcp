@@ -181,8 +181,17 @@ export class Transactor {
 
   private async changedPaths(): Promise<string[]> {
     // -z gives NUL-separated, unquoted paths. Unstaged changes never show as renames,
-    // so every entry is a bare "XY path" record.
-    const out = await this.git(['--no-optional-locks', 'status', '--porcelain=v1', '-z']);
+    // so every entry is a bare "XY path" record. --untracked-files=all is load-bearing:
+    // without it git collapses a new note's new parent directory to "NewFolder/", so
+    // validateChangedFile would see a directory instead of the note and skip its content
+    // checks — a delegated write to a fresh folder would then commit unvalidated.
+    const out = await this.git([
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+      '-z',
+    ]);
     return out
       .split('\0')
       .filter((entry) => entry.length > 3)

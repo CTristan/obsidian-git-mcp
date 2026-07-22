@@ -128,6 +128,13 @@ function isUnchanged(before: ManifestEntry | undefined, after: ManifestEntry): b
  * following whatever now sits there.
  */
 async function mkdirNoFollow(vaultPath: string, rel: string): Promise<void> {
+  // Reject a literal ".." segment at this layer too. It's unreachable today — manifestOf
+  // builds rel from real readdir entries, and no directory entry is ever named ".." — but
+  // the contract is that traversal is refused independently here, not only upstream, so
+  // the join()-based paths below can never be trusted to a caller's discipline alone.
+  if (rel.split('/').includes('..')) {
+    throw new Error(`${rel}: refusing to write through a path-traversal segment`);
+  }
   let cur = vaultPath;
   for (const segment of dirname(rel).split('/')) {
     if (segment === '' || segment === '.') continue;

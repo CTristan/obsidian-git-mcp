@@ -64,6 +64,28 @@ describe('transaction safety', () => {
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
   });
 
+  it('a note in a brand-new folder is still content-validated, not waved through', async () => {
+    // `git status` collapses an untracked new folder to "NewFolder/", so without
+    // --untracked-files=all the change scan would hand validateChangedFile a directory
+    // path — never the .md inside it — and commit the note unvalidated. The note must be
+    // refused exactly as one in an existing folder is.
+    srv = await startServer(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await fx.bareHead();
+
+    const res = await callTool(srv.client, 'write_note', {
+      path: 'BrandNew/Bad.md',
+      content: '# Bad\n\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('conflict marker');
+
+    const postRemote = await fx.bareHead();
+    expect(postRemote).toBe(preRemote);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
   it('broken frontmatter YAML never reaches the remote', async () => {
     srv = await startServer(fx);
     const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);

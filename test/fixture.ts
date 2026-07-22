@@ -6,10 +6,13 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
-// GIT_CONFIG_GLOBAL/SYSTEM point at /dev/null so fixture git never inherits the host's
-// config — a global hook, alias, or signing setting must not change test behavior.
+// Strip every inherited GIT_* variable before setting our own: GIT_DIR, GIT_WORK_TREE,
+// GIT_INDEX_FILE, and friends would otherwise point fixture git at a parent repository
+// (e.g. when the suite runs inside a git hook or nested git invocation), so a fixture
+// could read or mutate the wrong checkout. GIT_CONFIG_GLOBAL/SYSTEM then point at /dev/null
+// so no host config — a global hook, alias, or signing setting — can change test behavior.
 const FIXTURE_GIT_ENV = {
-  ...process.env,
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
   GIT_TERMINAL_PROMPT: '0',
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_SYSTEM: '/dev/null',
@@ -158,8 +161,13 @@ async function buildFixture(
       return stdout;
     },
     async cleanup() {
-      await rm(root, { recursive: true, force: true });
-      await rm(outsideDir, { recursive: true, force: true });
+      // finally, so a failure removing root still reaps outsideDir — it lives outside root
+      // (a separate mkdtemp), so nothing else would ever clean it up.
+      try {
+        await rm(root, { recursive: true, force: true });
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
     },
   };
 }

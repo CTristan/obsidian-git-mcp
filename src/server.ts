@@ -378,24 +378,28 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
         await stageClient.connect(stageClientTransport);
         let callError: unknown;
+        let closes: PromiseSettledResult<void>[] = [];
         try {
           result = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
         } catch (err) {
           callError = err;
         } finally {
-          const closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
-          const failed = closes.find((r) => r.status === 'rejected');
-          // Prefer the real tool failure — a close rejection on top of it is noise that
-          // would otherwise mask the error the caller actually needs.
-          if (callError !== undefined) {
-            throw callError;
-          }
-          if (failed && result === undefined) {
-            throw (failed as PromiseRejectedResult).reason;
-          }
+          // Close in finally, but decide what to throw AFTER it — throwing from inside a
+          // finally would itself discard an in-flight exception, the exact masking bug this
+          // ordering avoids.
+          closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
         }
-        // Reaching here means the staged call assigned a result — the finally re-throws
-        // callError on any rejection — so this both narrows the type and states that invariant.
+        // Prefer the real tool failure — a close rejection on top of it is noise that would
+        // otherwise mask the error the caller actually needs.
+        if (callError !== undefined) {
+          throw callError;
+        }
+        const failedClose = closes.find((r) => r.status === 'rejected');
+        if (failedClose && result === undefined) {
+          throw (failedClose as PromiseRejectedResult).reason;
+        }
+        // Reaching here means the staged call assigned a result — a rejection would have
+        // thrown callError above — so this both narrows the type and states that invariant.
         if (result === undefined) {
           throw new Error(`${name}: staged call resolved without a result`);
         }
