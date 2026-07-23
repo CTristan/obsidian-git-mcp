@@ -2,7 +2,7 @@
 
 ## Setup
 
-You need Node ≥ 24, pnpm, and git on `PATH` (the transaction wrapper shells out to the system `git`).
+You need Node ≥ 24, pnpm, and git ≥ 2.32 on `PATH`. The transaction wrapper shells out to the system `git`, and the test fixtures isolate themselves from your host git config through `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, which older git silently ignores — a leak that would let a global hook, alias, or signing setting change test behavior.
 
 ```sh
 pnpm install
