@@ -63,7 +63,7 @@ describe('forbiddenPathReason', () => {
 describe('canonicalization drift guard', () => {
   it('refuses every restricted spelling MCPVault folds to a restricted segment', () => {
     // paths.ts mirrors MCPVault's per-segment trailing-dot/space fold as a second
-    // defense (paths.ts:40), but that mirror was unguarded -- a MCPVault upgrade that
+    // defense (paths.ts:40), but that mirror was unguarded — a MCPVault upgrade that
     // widens the fold would silently desync the two layers. canonicalizeForMatch is
     // `private` only at the TypeScript layer; MCPVault compiles to a plain-JS prototype
     // method, so the cast below invokes the real runtime fold PathFilter applies before

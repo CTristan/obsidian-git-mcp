@@ -16,7 +16,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { mapWithConcurrency } from './concurrency.js';
+import { mapWithConcurrency, Semaphore } from './concurrency.js';
 import { forbiddenPathReason } from './paths.js';
 
 /**
@@ -36,13 +36,14 @@ export interface ManifestEntry {
 export type Manifest = Map<string, ManifestEntry>;
 
 /**
- * Cap on how many of one directory's entries manifestOf lstats at once. A flat attachments
- * folder with years of pasted images is a real vault shape, and an uncapped Promise.all over
- * it would fire thousands of concurrent lstat calls — nested walk recursion stacking still
- * more on top — which starves libuv's threadpool and hits EMFILE instead of scaling. 64 keeps
- * the parallelism win while bounding the outstanding fd/threadpool load.
+ * Cap on how many lstat calls manifestOf keeps outstanding at once, applied globally across
+ * the whole recursive walk, not per directory. A flat attachments folder with years of pasted
+ * images is a real vault shape, and an uncapped Promise.all over it would fire thousands of
+ * concurrent lstat calls — nested walk recursion stacking still more on top — which starves
+ * libuv's threadpool and hits EMFILE instead of scaling. 64 keeps the parallelism win while
+ * bounding the outstanding fd/threadpool load.
  */
-const DIR_CONCURRENCY = 64;
+export const DIR_CONCURRENCY = 64;
 
 /**
  * Clone the vault worktree into an ephemeral 0700 dir so a delegated write mutates a
@@ -90,6 +91,13 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
  */
 export async function manifestOf(dir: string): Promise<Manifest> {
   const manifest: Manifest = new Map();
+  // One semaphore shared across the entire recursion, so the DIR_CONCURRENCY ceiling on
+  // outstanding lstats is global — not re-applied fresh at every directory level, which would
+  // let sibling subtrees walking in parallel multiply it by the number of directories in flight.
+  // mapWithConcurrency still waves each directory's entries so a single huge flat folder never
+  // materializes thousands of pending closures at once; the semaphore is what bounds the *total*
+  // lstat fan-out across the whole tree.
+  const lstatLimit = new Semaphore(DIR_CONCURRENCY);
   const walk = async (cur: string, prefix: string): Promise<void> => {
     // Names only — readdir's dirent types are deliberately untrusted, because a filesystem
     // reporting DT_UNKNOWN (some network/older filesystems, never APFS/ext4) makes every
@@ -98,15 +106,16 @@ export async function manifestOf(dir: string): Promise<Manifest> {
     const names = await readdir(cur);
     // Every entry's lstat (and any recursive walk it triggers) is independent of every other's,
     // so run them through mapWithConcurrency instead of awaiting one at a time — otherwise scan
-    // latency scales linearly with the vault's file count. The DIR_CONCURRENCY cap keeps a huge
-    // flat directory from fanning out into thousands of simultaneous lstats.
+    // latency scales linearly with the vault's file count.
     await mapWithConcurrency(names, DIR_CONCURRENCY, async (name) => {
       const abs = join(cur, name);
       const rel = prefix === '' ? name : `${prefix}/${name}`;
       // lstat, never stat, drives both the recurse decision and isSymlink: a symlink to a
       // directory reports isDirectory() false / isSymbolicLink() true, so it's recorded as
-      // a link here, not descended into — the walk never leaves the tree it started in.
-      const st = await lstat(abs, { bigint: true });
+      // a link here, not descended into — the walk never leaves the tree it started in. The
+      // recurse happens after run() releases the permit, never while holding one, so the
+      // shared limiter can't deadlock on a directory waiting for its own children.
+      const st = await lstatLimit.run(() => lstat(abs, { bigint: true }));
       if (st.isDirectory()) {
         await walk(abs, rel);
         return;
@@ -120,7 +129,10 @@ export async function manifestOf(dir: string): Promise<Manifest> {
     });
   };
   await walk(dir, '');
-  return manifest;
+  // Return in lexicographic key order: entries land in the map in lstat-settle order, which the
+  // concurrent walk makes nondeterministic, and applyCloneDiff's write-back order follows the
+  // map's iteration order — sorting here keeps that order stable across runs.
+  return new Map([...manifest].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /**

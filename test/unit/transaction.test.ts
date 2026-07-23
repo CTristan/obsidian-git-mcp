@@ -118,6 +118,37 @@ describe('Transactor.reconcileAtStartup', () => {
   });
 });
 
+describe('Transactor lockfile format round-trip', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('reads back the holder pid through the real acquireLock write path, so a format change breaks the parser too', async () => {
+    // acquireLock's write format and releaseStaleLock's parser must agree on the exact
+    // lockfile text; a test that hardcodes the "pid N" string can't catch a write-format
+    // change that desyncs the two. Drive the real write path and read it back: acquireLock
+    // records THIS process's pid, which is alive, so releaseStaleLock must recognize the
+    // holder and refuse. A broken round-trip would instead parse no pid, treat the live
+    // lock as dead, and silently clear it.
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    const transactor = makeTransactor(fx);
+
+    await transactor['acquireLock']();
+
+    const err: unknown = await transactor['releaseStaleLock']().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LockError);
+    expect((err as Error).message).toMatch(new RegExp(`live pid ${process.pid}\\b`));
+    // The live holder's lock stays put — releaseStaleLock refused rather than clearing it.
+    expect(existsSync(lockPath)).toBe(true);
+  });
+});
+
 describe('Transactor startup note scan', () => {
   let fx: Fixture;
 
@@ -270,6 +301,48 @@ describe('Transactor ignored-file change signal', () => {
     expect((err as Error).message).toBe('refusing private/notes.md by name');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
     expect(existsSync(ignoredPath)).toBe(false);
+  });
+});
+
+describe('Transactor.transact return shape', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('returns the pushed SHA alongside the mutation callback result', async () => {
+    // transact is generic like readTransaction: it forwards whatever the mutate callback
+    // produces back to the caller, so a delegated write consumes its result directly
+    // instead of smuggling it out through a closure variable.
+    const transactor = makeTransactor(fx);
+
+    const { sha, result } = await transactor.transact('a tracked write', async () => {
+      await writeFile(join(fx.serverDir, 'Inbox', 'Beta.md'), '# Beta\n\nupdated\n');
+      return { note: 'Beta' };
+    });
+
+    // The returned sha is the commit that actually landed on the remote.
+    expect(sha).toBe(await git(['rev-parse', 'main'], fx.bareDir));
+    expect(sha).toBe(await git(['rev-parse', 'HEAD'], fx.serverDir));
+    expect(result).toEqual({ note: 'Beta' });
+  });
+
+  it('forwards the callback result and the unchanged HEAD when the mutation touched nothing', async () => {
+    // A no-op mutation commits nothing, so transact returns the pre-transaction HEAD as
+    // its sha — but still forwards the callback's result, so the result channel is
+    // independent of whether a commit landed.
+    const transactor = makeTransactor(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+
+    const { sha, result } = await transactor.transact('a no-op mutation', async () => 'no changes');
+
+    expect(sha).toBe(preHead);
+    expect(result).toBe('no changes');
   });
 });
 

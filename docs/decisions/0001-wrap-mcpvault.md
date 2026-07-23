@@ -40,16 +40,16 @@ Two days of adversarial review hardened the wrapper and produced evidence the sp
 
 ### Options the spike record never captured
 
-- **Fork MCPVault itself** — patch out the quirks and the parser exposure instead of guarding around them. Rejected for the same reason forking the git-flavored servers lost: a fork forfeits upstream's fixes precisely where upstream is strongest (path-security CVEs have shipped promptly), while keeping every maintenance cost.
+- **Fork MCPVault itself** — patch out the quirks and the parser exposure instead of guarding around them. Rejected for the same reason forking the git-flavored servers lost: a fork forfeits upstream's fixes precisely where upstream is strongest (the path-security CVEs [CVE-2026-57441](https://github.com/advisories/GHSA-j99q-93c9-h869) and [CVE-2026-57442](https://github.com/advisories/GHSA-9c83-rr99-vfwj) shipped fixes in `0.11.4` and `0.11.5`), while keeping every maintenance cost.
 - **Remote-first, no checkout** — write through GitHub's git-data API (create blobs and a tree, commit, then a compare-and-swap ref update). The atomic ref update is genuinely cleaner than fetch, fast-forward, push, and retry, but every read, search, and validation still wants a local checkout, and it hard-couples the server to GitHub when the design only requires a git remote. Rejected.
 - **Wiring variant: in-process versus subprocess.** The spike enumerated wiring options (a stray "Option (a) protocol proxy" comment survived into review), but the losing side never made it into the record. In-process over `InMemoryTransport` won; the obvious alternative, a spawned subprocess over stdio, would have added a process to supervise and a serialization boundary inside every transaction. Just to clarify, that reasoning is reconstructed after the fact — the outcome is original, the rationale for the loser is not.
 
 ### What the hardening evidence says
 
 - Of the 15 proxied tools, only `search_notes` and `list_all_tags` carry an algorithm worth keeping (ranking and snippets; vault-wide tag extraction). The other 13 are direct filesystem or gray-matter primitives, and gray-matter is already a direct dependency of the wrapper.
-- The wrapper's most complex subsystems exist to defend against MCPVault specifics, not to add value: the clone-per-write sandbox (MCPVault writes straight to the path it is constructed with, so every delegated write runs against a throwaway clone and diffs back), the vault-wide executable-frontmatter scan (MCPVault leaves gray-matter's `js`/`javascript` engines live, so every fetched note is screened before MCPVault may parse it), and five mirrored internals, all but one drift-tested (the exception is the per-tool path-argument names).
+- The wrapper's most complex subsystems exist to defend against MCPVault specifics, not to add value: the clone-per-write sandbox (MCPVault writes straight to the path it is constructed with, so every delegated write runs against a throwaway clone and diffs back), the vault-wide executable-frontmatter scan (MCPVault leaves gray-matter's `js`/`javascript` engines live, so every fetched note is screened before MCPVault may parse it), and five mirrored internals, each drift-tested (the last exception, the per-tool path-argument names, is now pinned by the `MCPVAULT_TOOL_ARGS` snapshot against the live MCPVault schema).
 - `append_to_section` already proves the alternative: a wrapper-native write that keeps the fd-pinned writes, symlink containment, transaction, and rollback while needing none of that scaffolding.
-- Upstream is real but concentrated: ~29k npm downloads a month and a track record of shipping path-security CVE fixes promptly, against a single maintainer holding ~81% of commits, bursty releases, and the frontmatter code-execution exposure still open and untracked upstream (its security docs claim frontmatter validation, but the `---js` engine path is not covered by it).
+- Upstream is real but concentrated: [~29k npm downloads a month](https://www.npmjs.com/package/@bitbonsai/mcpvault) and a track record of shipping path-security CVE fixes promptly, against a single maintainer holding [~81% of commits](https://github.com/bitbonsai/mcpvault/graphs/contributors), bursty releases, and the frontmatter code-execution exposure still open and untracked upstream (its security docs claim frontmatter validation, but the `---js` engine path is not covered by it).
 
 ### Verdict
 
@@ -65,9 +65,9 @@ Either way the git transaction layer, which is the point of the project, is unto
 
 Any of these accelerates or completes the handover:
 
-- An upgrade renames a path-carrying tool argument or adds a tool the classification pin doesn't know (the contract suite's known-tool pin goes red). This is the one unguarded mirror firing.
+- An upgrade renames a path-carrying tool argument (the `MCPVAULT_TOOL_ARGS` snapshot goes red) or adds a tool the classification pin doesn't know (the contract suite's known-tool pin goes red). Both are now drift-tested, so a red pin — not a silent containment bypass — is the trigger.
 - Upstream changes its frontmatter-engine handling in either direction, because a regression widens the exposure and a fix strands a vault-wide guard we can neither prove unnecessary nor delete while black-boxing.
 - A path-security regression lands in a release (the containment suite goes red on a version bump).
-- Any release injects non-content payloads into tool responses (an unsolicited ad-SDK pitch is sitting open upstream as this is written). That one is immediate: pin, freeze, and swap.
+- Any release injects non-content payloads into tool responses (an unsolicited ad-SDK pitch, [`bitbonsai/mcpvault#155`](https://github.com/bitbonsai/mcpvault/issues/155) opened 2026-07-23, is sitting open upstream). That one is immediate: pin, freeze, and swap.
 - Upstream goes quiet: roughly six months without a release while a security-relevant issue sits open, or the package is archived or unpublished.
 - Read-side parity lands anyway (search ranking and tag extraction reach quality we accept), at which point the last reason to keep the dependency is gone.

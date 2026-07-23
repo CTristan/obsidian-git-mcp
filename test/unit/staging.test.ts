@@ -21,6 +21,7 @@ import {
   applyCloneDiff,
   cloneWorktree,
   COPY_CHUNK_SIZE,
+  DIR_CONCURRENCY,
   manifestOf,
   openPinnedHandle,
   writeAllAt,
@@ -299,6 +300,56 @@ describe('manifestOf nested tree', () => {
     expect(manifest.get('dirlink')?.isSymlink).toBe(true);
     expect(manifest.get('filelink')?.isSymlink).toBe(true);
     expect(manifest.get('a.md')?.size).toBe(4n);
+  });
+});
+
+describe('manifestOf global lstat bound', () => {
+  let root: string;
+  let actual: typeof import('node:fs/promises');
+
+  beforeEach(async () => {
+    actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    root = await mkdtemp(join(tmpdir(), 'ogm-bound-'));
+    // 8 directories x 20 files = 160 entries that become ready to lstat together as soon as
+    // their parent directories are discovered — far past the 64 cap, so a per-directory fan-out
+    // runs ~160 lstats at once (8 sibling subtrees x 20 each) while a global cap holds at 64.
+    for (let d = 0; d < 8; d++) {
+      const sub = join(root, `d${d}`);
+      await mkdir(sub);
+      for (let f = 0; f < 20; f++) {
+        await writeFile(join(sub, `f${f}.md`), 'x\n');
+      }
+    }
+  });
+
+  afterEach(async () => {
+    vi.mocked(lstat).mockRestore();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('never runs more than DIR_CONCURRENCY lstats at once across the whole nested tree', async () => {
+    // Wrap the real lstat to count concurrent calls and force overlap with a small delay. The
+    // old per-directory cap re-applied 64 fresh at each level, so sibling subtrees walking in
+    // parallel multiplied it; the fix threads one shared limiter through the recursion so the
+    // ceiling is global regardless of tree shape.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.mocked(lstat).mockImplementation((async (path: string, options: unknown) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await actual.lstat(path, options as { bigint: true });
+      } finally {
+        inFlight--;
+      }
+    }) as typeof lstat);
+
+    const manifest = await manifestOf(root);
+
+    // The cap bounds concurrency, it never drops work: every file is still fingerprinted.
+    expect(manifest.size).toBe(160);
+    expect(maxInFlight).toBeLessThanOrEqual(DIR_CONCURRENCY);
   });
 });
 

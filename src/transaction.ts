@@ -89,6 +89,26 @@ const FINGERPRINT_CONCURRENCY = 64;
 const NETWORK_GIT_TIMEOUT_MS = 300_000;
 
 /**
+ * The vault lockfile records its holder's pid so releaseStaleLock can tell a live
+ * cross-process holder (refuse to start) from a crash-orphaned one (safe to clear). The
+ * writer and parser below share this prefix because a desync between them is silently
+ * catastrophic: if the parser stopped matching the write format, releaseStaleLock would
+ * read no pid, treat a live holder as dead, and unlink its lock — letting a concurrent
+ * cross-process transaction corrupt the shared checkout.
+ */
+const LOCK_PID_PREFIX = 'pid ';
+
+function serializeLock(pid: number): string {
+  return `${LOCK_PID_PREFIX}${pid} at ${new Date().toISOString()}\n`;
+}
+
+function parseLockPid(contents: string): number | undefined {
+  if (!contents.startsWith(LOCK_PID_PREFIX)) return undefined;
+  const pid = Number.parseInt(contents.slice(LOCK_PID_PREFIX.length), 10);
+  return Number.isNaN(pid) ? undefined : pid;
+}
+
+/**
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
  * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
  * pre-transaction checkout, because a write that didn't reach the remote never happened.
@@ -160,7 +180,7 @@ export class Transactor {
     // The lockfile already exists on disk here, so a failure writing or closing must
     // remove it — otherwise the orphan blocks every write until the next restart.
     try {
-      await handle.writeFile(`pid ${process.pid} at ${new Date().toISOString()}\n`);
+      await handle.writeFile(serializeLock(process.pid));
       await handle.close();
     } catch (err) {
       await handle.close().catch(() => {});
@@ -196,7 +216,7 @@ export class Transactor {
     // Our own pid counts as live too: a lockfile with this process's pid means another
     // Transactor in this same process holds it (the lockfile, not the in-process mutex,
     // is what separates two Transactors on one checkout).
-    const pid = Number(contents.match(/^pid (\d+)/)?.[1]);
+    const pid = parseLockPid(contents);
     if (pid && this.isProcessAlive(pid)) {
       throw new LockError(
         `the vault lock at ${this.lockPath} is held by live pid ${pid}; refusing to start`,
@@ -426,8 +446,8 @@ export class Transactor {
     });
   }
 
-  /** Run one mutation as a full transaction. Returns the pushed commit SHA. */
-  transact(message: string, mutate: () => Promise<void>): Promise<string> {
+  /** Run one mutation as a full transaction. Returns the pushed commit SHA and the mutation's result. */
+  transact<T>(message: string, mutate: () => Promise<T>): Promise<{ sha: string; result: T }> {
     return this.enqueue(async () => {
       // acquireLock sits outside the try: a failed acquire must never reach the finally,
       // because unlinking a foreign process's lockfile would let two writers interleave.
@@ -457,7 +477,7 @@ export class Transactor {
         const ignoredBefore = await this.ignoredFiles();
         const ignoredBeforeFingerprint = await this.ignoredFingerprint(ignoredBefore);
 
-        await mutate();
+        const result = await mutate();
 
         const changed = await this.changedPaths();
         const ignoredBeforeSet = new Set(ignoredBefore);
@@ -496,7 +516,7 @@ export class Transactor {
                 'stage or commit; refusing to report success for an untracked write',
             );
           }
-          return rollbackTo;
+          return { sha: rollbackTo, result };
         }
         for (const relPath of changed) {
           await this.cfg.validateChangedFile(relPath);
@@ -509,7 +529,7 @@ export class Transactor {
           env: this.commitEnv(),
         });
 
-        return await this.pushWithRetries();
+        return { sha: await this.pushWithRetries(), result };
       } catch (err) {
         if (rollbackTo !== undefined) {
           await this.git(['rebase', '--abort']).catch(() => {});

@@ -26,3 +26,55 @@ export async function mapWithConcurrency<T, R>(
   }
   return results;
 }
+
+/**
+ * A counting semaphore that bounds how many holders run `fn` at once. mapWithConcurrency's
+ * fixed waves cap a single flat list, but they can't bound a *recursive* fan-out: manifestOf's
+ * walk re-enters mapWithConcurrency at every directory level and sibling subtrees walk in
+ * parallel, so a per-call cap of N lets a nested tree run N x (concurrently-walking directories)
+ * operations at once. Threading one semaphore through the whole recursion instead keeps the
+ * outstanding count at `permits` no matter the tree shape. Permits are handed FIFO so a waiter
+ * can't be starved, and each is held only for the duration of one `fn` — a caller that recurses
+ * must do so *after* run() returns, never while holding a permit, or the fan-out deadlocks.
+ */
+export class Semaphore {
+  private available: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(permits: number) {
+    if (!Number.isInteger(permits) || permits <= 0) {
+      throw new RangeError(`permits must be a positive integer, got ${permits}`);
+    }
+    this.available = permits;
+  }
+
+  async run<R>(fn: () => Promise<R>): Promise<R> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.available > 0) {
+      this.available--;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  private release(): void {
+    const next = this.waiters.shift();
+    // Hand the permit straight to the oldest waiter rather than bumping the count and letting it
+    // re-race — that transfer is what makes the ceiling hold exactly at `permits`.
+    if (next === undefined) {
+      this.available++;
+    } else {
+      next();
+    }
+  }
+}

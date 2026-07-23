@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapWithConcurrency } from '../../src/concurrency.js';
+import { mapWithConcurrency, Semaphore } from '../../src/concurrency.js';
 
 function deferredDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,5 +74,48 @@ describe('mapWithConcurrency', () => {
     });
     expect(results).toEqual([]);
     expect(called).toBe(false);
+  });
+});
+
+describe('Semaphore', () => {
+  it('bounds concurrent holders globally across a recursive fan-out', async () => {
+    // The manifestOf failure this guards: a cap re-applied at each recursion level lets sibling
+    // subtrees multiply the real concurrency. One shared semaphore threaded through the recursion
+    // must hold the global ceiling no matter the fan-out shape — each holder acquires, does its
+    // work, releases, and only then fans out into more holders.
+    const sem = new Semaphore(4);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const visit = async (depth: number): Promise<void> => {
+      await sem.run(async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await deferredDelay(5);
+        inFlight--;
+      });
+      if (depth > 0) {
+        await Promise.all([visit(depth - 1), visit(depth - 1), visit(depth - 1)]);
+      }
+    };
+    await visit(4);
+    expect(maxInFlight).toBe(4);
+  });
+
+  it('rejects a non-positive or non-integer permit count with RangeError', () => {
+    for (const bad of [0, -1, 1.5, NaN]) {
+      expect(() => new Semaphore(bad)).toThrow(RangeError);
+    }
+  });
+
+  it('releases the permit even when the holder throws', async () => {
+    const sem = new Semaphore(1);
+    await expect(
+      sem.run(async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    // A leaked permit would hang this second acquire forever; a bounded resolve proves release
+    // ran on the throwing path.
+    await expect(sem.run(async () => 'ok')).resolves.toBe('ok');
   });
 });

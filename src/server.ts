@@ -29,8 +29,9 @@ const VERSION = '0.1.0';
 // Must mirror MCPVault's own PathFilter.allowedExtensions exactly (currently
 // ['.md', '.markdown', '.txt', '.base', '.canvas']) — MCPVault's FrontmatterHandler runs
 // gray-matter on every one of these on every read, and gray-matter's default js/javascript
-// engines execute frontmatter code unless refuseExecutableFrontmatter runs first. f-006
-// adds a drift test asserting this stays in sync with MCPVault's runtime allowedExtensions.
+// engines execute frontmatter code unless refuseExecutableFrontmatter runs first. A drift
+// test in test/unit/server.test.ts asserts this stays a superset of MCPVault's runtime
+// allowedExtensions.
 export const FRONTMATTER_PARSED_EXTENSIONS = ['.md', '.markdown', '.txt', '.base', '.canvas'];
 
 // The security-gate predicate: every extension MCPVault will hand to gray-matter, so every
@@ -415,8 +416,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         }
       }
     }
-    let result: CallToolResult | undefined;
-    const sha = await transactor.transact(commitMessageFor(name, args), async () => {
+    const { sha, result } = await transactor.transact(commitMessageFor(name, args), async () => {
       // Delegated writes never touch the live vault directly. We clone the fast-forwarded
       // worktree into an ephemeral 0700 dir, run a throwaway MCPVault against the clone,
       // then copy only the changed bytes back through fd-pinned writes. This narrows the
@@ -446,12 +446,13 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         });
         const [stageClientTransport, stageServerTransport] = InMemoryTransport.createLinkedPair();
         const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
+        let callResult: CallToolResult | undefined;
         let callError: unknown;
         let closes: PromiseSettledResult<void>[] = [];
         try {
           await stageServer.connect(stageServerTransport);
           await stageClient.connect(stageClientTransport);
-          result = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
+          callResult = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
         } catch (err) {
           callError = err;
         } finally {
@@ -466,16 +467,16 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
           throw callError;
         }
         const failedClose = closes.find((r) => r.status === 'rejected');
-        if (failedClose && result === undefined) {
+        if (failedClose && callResult === undefined) {
           throw (failedClose as PromiseRejectedResult).reason;
         }
         // Reaching here means the staged call assigned a result — a rejection would have
         // thrown callError above — so this both narrows the type and states that invariant.
-        if (result === undefined) {
+        if (callResult === undefined) {
           throw new Error(`${name}: staged call resolved without a result`);
         }
-        if (result.isError) {
-          throw new InnerToolError(textOf(result));
+        if (callResult.isError) {
+          throw new InnerToolError(textOf(callResult));
         }
 
         const after = await manifestOf(stage);
@@ -489,13 +490,11 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
           vaultPath,
           realVaultPath,
         );
+        return callResult;
       } finally {
         await rm(stage, { recursive: true, force: true });
       }
     });
-    if (!result) {
-      throw new Error(`${name}: transact() resolved without running mutate`);
-    }
     return { ...result, _meta: { ...(result._meta ?? {}), commitSha: sha } };
   };
 
@@ -525,7 +524,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     if (!absPath.startsWith(vaultPath + sep)) {
       return errorResult(`${path}: path escapes the vault`);
     }
-    const sha = await transactor.transact(`append_to_section: ${path} (${heading})`, async () => {
+    const { sha } = await transactor.transact(`append_to_section: ${path} (${heading})`, async () => {
       // Symlink containment runs INSIDE the transaction, after fetch/fast-forward, so
       // it also covers a symlink that only just arrived from the remote. Unlike the
       // MCPVault-forwarded tools (which realpath-guard upstream), this tool touches the
