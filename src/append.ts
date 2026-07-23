@@ -13,8 +13,12 @@ const HEADING = /^ {0,3}(#{1,6})(?:\s+(.+?))?(?:\s+#+)?\s*$/;
 // tab-indented "\t```" wrongly open a fence and mask every later real heading. The
 // trailing capture is the rest of the line after the marker run: for an opener it's the
 // info string (a backtick in a backtick-fence info string voids the opener), and for a
-// closer it must be whitespace-only.
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+// closer it must be whitespace-only. Splitting a CRLF note on "\n" leaves a trailing "\r" on
+// every line, so the capture is "[^\r]*" and a lone "\r?" is consumed before "$" — otherwise
+// "." never matches the "\r", "$" (no `m` flag) never reaches it, and the fence fails to
+// match at all. Keeping the "\r" out of the captured suffix means it can't flip the
+// backtick-info-string opener check or the whitespace-only closer check either.
+const FENCE = /^ {0,3}(`{3,}|~{3,})([^\r]*)\r?$/;
 
 // A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
 // line inside a ``` example); both scans below need to ignore those, so this returns,

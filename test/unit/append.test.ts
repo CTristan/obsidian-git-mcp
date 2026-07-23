@@ -79,6 +79,47 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('masks a "##" line inside a fenced code block in a CRLF note', () => {
+    // Splitting a CRLF note on "\n" leaves every line with a trailing "\r", so the fence
+    // matcher has to tolerate it — otherwise the fence never opens, the inner "## Fake"
+    // reads as a real boundary, and the append lands inside the code block. Output stays
+    // byte-identical CRLF.
+    const note = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\r\n');
+    const expected = [
+      '# T',
+      '',
+      '## Log',
+      '',
+      '```',
+      '## Fake',
+      '```',
+      '',
+      '- one',
+      '- two',
+      '',
+      '## Next',
+      '',
+      '- stuff',
+      '',
+    ].join('\r\n');
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
   it('does not select a "##" line inside a fenced code block as the target section', () => {
     // The note has no real "Log" heading, only a fenced example that looks like one, so
     // this must fall through to creating the section at the end of the note.
@@ -513,6 +554,14 @@ describe('appendToSection', () => {
     // its appended text) would land as code-block content and silently corrupt the note.
     // Refuse instead of appending into the open fence.
     const note = ['# T', '', '## Notes', '', '```', 'code line', ''].join('\n');
+    expect(() => appendToSection(note, 'Log', '- added')).toThrow(/unclosed code fence/);
+  });
+
+  it('refuses a missing-section append when a CRLF note ends inside an unclosed fence', () => {
+    // Same refusal as the LF case, but the "```" opener carries a trailing "\r" — the fence
+    // matcher must see through it, or endsOpen never trips and the refusal silently degrades
+    // into creating the section inside the still-open code block.
+    const note = ['# T', '', '## Notes', '', '```', 'code line', ''].join('\r\n');
     expect(() => appendToSection(note, 'Log', '- added')).toThrow(/unclosed code fence/);
   });
 

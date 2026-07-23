@@ -80,28 +80,33 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
 export async function manifestOf(dir: string): Promise<Manifest> {
   const manifest: Manifest = new Map();
   const walk = async (cur: string, prefix: string): Promise<void> => {
-    const dirents = await readdir(cur, { withFileTypes: true });
-    // Every entry's lstat (or recursive walk) is independent of every other's, so batch them
-    // through Promise.all instead of awaiting one at a time — otherwise scan latency scales
-    // linearly with the vault's file count. Slice into DIR_CONCURRENCY-sized waves so a huge
-    // flat directory can't fan out into thousands of simultaneous lstats.
-    for (let i = 0; i < dirents.length; i += DIR_CONCURRENCY) {
+    // Names only — readdir's dirent types are deliberately untrusted, because a filesystem
+    // reporting DT_UNKNOWN (some network/older filesystems, never APFS/ext4) makes every
+    // dirent.is*() return false without Node falling back to lstat, which would skip a real
+    // directory from recursion and record a real symlink with isSymlink: false.
+    const names = await readdir(cur);
+    // Every entry's lstat (and any recursive walk it triggers) is independent of every other's,
+    // so batch them through Promise.all instead of awaiting one at a time — otherwise scan
+    // latency scales linearly with the vault's file count. Slice into DIR_CONCURRENCY-sized
+    // waves so a huge flat directory can't fan out into thousands of simultaneous lstats.
+    for (let i = 0; i < names.length; i += DIR_CONCURRENCY) {
       await Promise.all(
-        dirents.slice(i, i + DIR_CONCURRENCY).map(async (dirent) => {
-          const abs = join(cur, dirent.name);
-          const rel = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
-          // isDirectory()/isSymbolicLink() come from readdir's own lstat, so a symlink to a
-          // directory is a symlink here, not a directory — it's recorded, not descended into.
-          if (dirent.isDirectory()) {
+        names.slice(i, i + DIR_CONCURRENCY).map(async (name) => {
+          const abs = join(cur, name);
+          const rel = prefix === '' ? name : `${prefix}/${name}`;
+          // lstat, never stat, drives both the recurse decision and isSymlink: a symlink to a
+          // directory reports isDirectory() false / isSymbolicLink() true, so it's recorded as
+          // a link here, not descended into — the walk never leaves the tree it started in.
+          const st = await lstat(abs, { bigint: true });
+          if (st.isDirectory()) {
             await walk(abs, rel);
             return;
           }
-          const st = await lstat(abs, { bigint: true });
           manifest.set(rel, {
             size: st.size,
             mtimeNs: st.mtimeNs,
             ino: st.ino,
-            isSymlink: dirent.isSymbolicLink(),
+            isSymlink: st.isSymbolicLink(),
           });
         }),
       );
