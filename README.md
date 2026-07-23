@@ -16,6 +16,8 @@ An MCP server for git-backed Obsidian vaults. Every write an AI collaborator mak
 
 My vault's `main` branch on GitHub is the canonical copy of my second brain, and AI collaborators read and write it directly. The existing git-flavored vault MCP servers either treat the local checkout as a disposable cache the remote overwrites, or batch writes on a debounce timer and push whenever — which means a concurrent edit can silently vanish, and a "successful" write may never reach the remote. That's not acceptable for a vault that multiple agents and my own devices sync against, so this server makes git the transaction boundary: a write either lands as a pushed, attributed, validated commit, or the checkout rolls back and the caller is told why.
 
+The full build-vs-wrap evaluation — why the server wraps MCPVault instead of forking one of those servers — is recorded in [docs/decisions/0001-wrap-mcpvault.md](docs/decisions/0001-wrap-mcpvault.md).
+
 ## Installing
 
 Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
@@ -60,13 +62,11 @@ Example Claude Code registration:
 claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
 
-## Status: the spike's verdict
+## Behavior notes
 
-MCPVault stays. The contract suite (spanning reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
-
-Two quirks worth knowing, neither disqualifying:
+Two tool behaviors worth knowing before you write:
 
 - `update_frontmatter` preserves sibling keys and their data but normalizes flow-style whitespace (`[project]` becomes `[ project ]`), so frontmatter updates are semantically targeted, not byte-targeted. The note body stays byte-identical.
 - `patch_note` is exact-string replace (`oldString`/`newString`), not heading-targeted. That works well in practice, because agents read a note before editing it, and reproducing exact bytes is more reliable for them than heading arithmetic.
 
-`get_backlinks` and `resolve_wikilink` are tracked in [#2](https://github.com/CTristan/obsidian-git-mcp/issues/2).
+`get_backlinks` and `resolve_wikilink` aren't implemented yet — they're tracked in [#2](https://github.com/CTristan/obsidian-git-mcp/issues/2).
