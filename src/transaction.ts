@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { mapWithConcurrency } from './concurrency.js';
 import { runGit, type GitOptions } from './git.js';
 
 export class TransactionError extends Error {
@@ -62,12 +63,28 @@ export interface TransactorConfig {
 const SCAN_CONCURRENCY = 64;
 
 /**
+ * Cap on how many ignored paths ignoredFingerprint() lstats at once. A vault that
+ * gitignores .obsidian/ can hold thousands of plugin/workspace/cache files, and this runs
+ * on every transact(), so an uncapped Promise.all here would fire that whole tree's lstat
+ * calls in one burst — the same threadpool/EMFILE starvation SCAN_CONCURRENCY and
+ * staging.ts's DIR_CONCURRENCY bound against.
+ */
+const FINGERPRINT_CONCURRENCY = 64;
+
+/**
  * Timeout for the git commands that talk to the remote — fetch and push. runGit defaults
  * every command to a 30s ceiling, which fits fast local plumbing but not network I/O: a
  * fetch or push against a large "second brain" vault or a slow remote can legitimately run
  * for minutes, and a 30s kill there fails an otherwise-healthy write and forces a needless
  * rollback. Local plumbing (status, rev-parse, merge, rebase, commit) keeps the 30s
  * default, because a hang there means something is genuinely wrong rather than merely slow.
+ *
+ * Operator note: this ceiling is per network command, and pushWithRetries can run several
+ * against a hung remote in one transact() — with maxPushRetries at its default of 2 that's
+ * up to 3 push attempts plus a post-failure fetch after each, so a truly wedged remote can
+ * hold a single tool call for ~30 minutes before it gives up and rolls back. Size the MCP
+ * client's tool-call timeout above that worst case, because a client that times out first
+ * reports a spurious failure to the caller while the transaction is still rolling back.
  */
 const NETWORK_GIT_TIMEOUT_MS = 300_000;
 
@@ -281,10 +298,10 @@ export class Transactor {
   private async ignoredFingerprint(relPaths: readonly string[]): Promise<string> {
     if (relPaths.length === 0) return '';
     const sorted = [...relPaths].sort();
-    const stats = await Promise.all(
-      sorted.map((relPath) =>
-        lstat(join(this.cfg.vaultPath, relPath)).catch(() => undefined),
-      ),
+    // FINGERPRINT_CONCURRENCY caps the fan-out the way manifestOf and the note scan do;
+    // mapWithConcurrency preserves input order, so stats[index] still lines up with sorted.
+    const stats = await mapWithConcurrency(sorted, FINGERPRINT_CONCURRENCY, (relPath) =>
+      lstat(join(this.cfg.vaultPath, relPath)).catch(() => undefined),
     );
     const hash = createHash('sha256');
     for (const [index, relPath] of sorted.entries()) {
@@ -323,17 +340,13 @@ export class Transactor {
       this.validatedThroughSha === undefined
         ? (await this.git(['ls-files', '-z'])).split('\0').filter((entry) => entry.length > 0)
         : await this.changedPathsSince(this.validatedThroughSha);
-    // Each note's refusal is independent of every other's, so batch them through
-    // SCAN_CONCURRENCY-sized Promise.all waves (staging.ts's manifestOf shape) instead of
-    // awaiting one at a time — a wave still rejects (and aborts the scan) the moment any
-    // note in it throws, matching the serial loop's fail-fast semantics.
-    for (let i = 0; i < paths.length; i += SCAN_CONCURRENCY) {
-      await Promise.all(
-        paths.slice(i, i + SCAN_CONCURRENCY).map((relPath) =>
-          this.cfg.refuseExecutableNote(relPath),
-        ),
-      );
-    }
+    // Each note's refusal is independent of every other's, so run them through
+    // mapWithConcurrency instead of awaiting one at a time — the SCAN_CONCURRENCY cap still
+    // rejects (and aborts the scan) the moment any note throws, matching the serial loop's
+    // fail-fast semantics.
+    await mapWithConcurrency(paths, SCAN_CONCURRENCY, (relPath) =>
+      this.cfg.refuseExecutableNote(relPath),
+    );
     this.validatedThroughSha = head;
   }
 
@@ -368,31 +381,48 @@ export class Transactor {
    * Run a read inside the mutex — the freshen step AND the read itself — so a read can
    * never observe another transaction's mid-mutation or mid-rollback tree state. The
    * returned headSha is captured in the same critical section the read ran in.
+   *
+   * The in-process enqueue mutex only serializes this Transactor's own operations; it's
+   * blind to a second process (a rolling-restart overlap, the case the lockfile's
+   * pid-embedded design already anticipates) mutating the shared checkout. So the read
+   * also takes the same on-disk lock transact() holds, over its whole critical section
+   * including the freshen step, because a cross-process write in flight can leave the
+   * worktree mid-mutation or mid-rollback exactly when this read would parse it. The
+   * trade-off is that a read can now fail with a LockError while a peer process is
+   * writing, rather than silently observing a half-applied tree.
    */
   readTransaction<T>(read: () => Promise<T>): Promise<{ headSha: string; result: T }> {
     return this.enqueue(async () => {
-      if (Date.now() - this.lastFetchAt >= this.cfg.readFreshnessMs) {
-        // A transient remote outage degrades reads to last-known state instead of
-        // failing them (writes stay strict — their own fetch is unguarded). The
-        // timestamp advances even on failure so an outage doesn't stall every read
-        // behind a fetch timeout.
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
-          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-        }).catch(() => {});
-        this.lastFetchAt = Date.now();
-        if (!(await this.isDirty())) {
-          // A diverged checkout can't fast-forward; reads then serve the last consistent
-          // state rather than failing, and the next write will surface the problem.
-          await this.git(['merge', '--ff-only', this.target()]).catch(() => {});
+      // acquireLock sits outside the try (same invariant as transact()): a failed acquire
+      // must never reach the finally, because unlinking a foreign process's lockfile would
+      // let a writer and this read interleave on the shared worktree.
+      await this.acquireLock();
+      try {
+        if (Date.now() - this.lastFetchAt >= this.cfg.readFreshnessMs) {
+          // A transient remote outage degrades reads to last-known state instead of
+          // failing them (writes stay strict — their own fetch is unguarded). The
+          // timestamp advances even on failure so an outage doesn't stall every read
+          // behind a fetch timeout.
+          await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+            timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+          }).catch(() => {});
+          this.lastFetchAt = Date.now();
+          if (!(await this.isDirty())) {
+            // A diverged checkout can't fast-forward; reads then serve the last consistent
+            // state rather than failing, and the next write will surface the problem.
+            await this.git(['merge', '--ff-only', this.target()]).catch(() => {});
+          }
         }
+        // Unconditional, not gated on this call's own fetch above: transact()'s mandatory
+        // fetch can have advanced HEAD between reads without ever visiting this method, and
+        // a note it landed must still clear this check before the next read touches it.
+        await this.refuseUnvalidatedFetchedNotes();
+        const headSha = await this.git(['rev-parse', 'HEAD']);
+        const result = await read();
+        return { headSha, result };
+      } finally {
+        await this.releaseLock();
       }
-      // Unconditional, not gated on this call's own fetch above: transact()'s mandatory
-      // fetch can have advanced HEAD between reads without ever visiting this method, and
-      // a note it landed must still clear this check before the next read touches it.
-      await this.refuseUnvalidatedFetchedNotes();
-      const headSha = await this.git(['rev-parse', 'HEAD']);
-      const result = await read();
-      return { headSha, result };
     });
   }
 

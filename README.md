@@ -62,7 +62,7 @@ claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian
 
 ## Status: the spike's verdict
 
-MCPVault stays. The contract suite (72 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
+MCPVault stays. The contract suite (spanning reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
 
 Two quirks worth knowing, neither disqualifying:
 

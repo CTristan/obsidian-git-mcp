@@ -317,6 +317,57 @@ describe('Transactor network-operation timeouts', () => {
   });
 });
 
+describe('Transactor.readTransaction cross-process locking', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('refuses a read while another process holds the on-disk write lock', async () => {
+    // The in-process enqueue mutex only serializes one Transactor's own operations; it
+    // can't see a second process mutating the shared checkout. Simulate that peer by
+    // planting the on-disk lockfile directly (as a concurrent cross-process transact()
+    // would), then prove the read refuses rather than parsing a mid-transaction tree.
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    await writeFile(lockPath, `pid ${process.pid}\n`);
+
+    const transactor = makeTransactor(fx);
+    let readRan = false;
+    const err: unknown = await transactor
+      .readTransaction(async () => {
+        readRan = true;
+        return 'unreachable';
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(LockError);
+    // The read body must never run while the peer holds the lock.
+    expect(readRan).toBe(false);
+    // A failed acquire must not unlink the peer's lockfile (that would let two writers
+    // interleave), so the foreign lock is still present.
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('releases the on-disk write lock when a read completes, so the next read can acquire it', async () => {
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    const transactor = makeTransactor(fx);
+
+    const { result } = await transactor.readTransaction(async () => 'first');
+    expect(result).toBe('first');
+    // The lock must be gone once the read finishes, or every later operation deadlocks.
+    expect(existsSync(lockPath)).toBe(false);
+    // If the first read had leaked the lock, this second read's acquireLock would throw
+    // LockError instead of returning cleanly.
+    const second = await transactor.readTransaction(async () => 'second');
+    expect(second.result).toBe('second');
+  });
+});
+
 describe('Transactor.changedPaths rename parsing', () => {
   let fx: Fixture;
 

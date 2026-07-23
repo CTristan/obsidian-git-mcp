@@ -378,117 +378,56 @@ describe('security', () => {
     await expectRemoteUnchanged(fx, preRemote);
   });
 
-  it('read_note refuses a .txt note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    // MCPVault's PathFilter.allowedExtensions covers .txt/.base/.canvas exactly like .md,
-    // and FrontmatterHandler.parse runs gray-matter on all of them — the same RCE the .md
-    // case above closes is reachable through any of MCPVault's writable extensions, not
-    // just the ones this wrapper happens to treat as "markdown."
-    (globalThis as Record<string, unknown>)['__ogmRceProbeTxtRead'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeTxtRead = true), "x") }',
-      '---',
-      'body',
-    ].join('\n');
-    await fx.collabWrite('Malicious.txt', payload, 'collab: add malicious note');
+  // MCPVault's PathFilter.allowedExtensions covers .txt/.base/.canvas exactly like .md,
+  // and FrontmatterHandler.parse runs gray-matter on all of them — the same RCE the .md
+  // case above closes is reachable through any of MCPVault's writable extensions, not
+  // just the ones this wrapper happens to treat as "markdown." Each row derives a unique
+  // probe key from its extension so a leaked ---js payload can't be masked by a sibling case.
+  it.each(['txt', 'base', 'canvas'])(
+    'read_note refuses a .%s note that arrived via fetch with executable ---js frontmatter, never running it',
+    async (ext) => {
+      const file = `Malicious.${ext}`;
+      const probeKey = `__ogmRceProbe${ext.charAt(0).toUpperCase()}${ext.slice(1)}Read`;
+      (globalThis as Record<string, unknown>)[probeKey] = false;
+      const payload = [
+        '---js',
+        `module.exports = { t: ((globalThis.${probeKey} = true), "x") }`,
+        '---',
+        'body',
+      ].join('\n');
+      await fx.collabWrite(file, payload, 'collab: add malicious note');
 
-    const res = await callTool(srv.client, 'read_note', { path: 'Malicious.txt' });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeTxtRead']).toBe(false);
-  });
+      const res = await callTool(srv.client, 'read_note', { path: file });
+      expect(res.isError).toBe(true);
+      expect((globalThis as Record<string, unknown>)[probeKey]).toBe(false);
+    },
+  );
 
-  it('read_note refuses a .base note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    (globalThis as Record<string, unknown>)['__ogmRceProbeBaseRead'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeBaseRead = true), "x") }',
-      '---',
-      'body',
-    ].join('\n');
-    await fx.collabWrite('Malicious.base', payload, 'collab: add malicious note');
+  it.each(['txt', 'base', 'canvas'])(
+    'patch_note refuses a .%s note that arrived via fetch with executable ---js frontmatter, never running it',
+    async (ext) => {
+      const file = `MaliciousW.${ext}`;
+      const probeKey = `__ogmRceProbe${ext.charAt(0).toUpperCase()}${ext.slice(1)}Write`;
+      (globalThis as Record<string, unknown>)[probeKey] = false;
+      const payload = [
+        '---js',
+        `module.exports = { t: ((globalThis.${probeKey} = true), "x") }`,
+        '---',
+        'original body',
+      ].join('\n');
+      await fx.collabWrite(file, payload, 'collab: add malicious note');
 
-    const res = await callTool(srv.client, 'read_note', { path: 'Malicious.base' });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeBaseRead']).toBe(false);
-  });
-
-  it('read_note refuses a .canvas note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    (globalThis as Record<string, unknown>)['__ogmRceProbeCanvasRead'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeCanvasRead = true), "x") }',
-      '---',
-      'body',
-    ].join('\n');
-    await fx.collabWrite('Malicious.canvas', payload, 'collab: add malicious note');
-
-    const res = await callTool(srv.client, 'read_note', { path: 'Malicious.canvas' });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeCanvasRead']).toBe(false);
-  });
-
-  it('patch_note refuses a .txt note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    (globalThis as Record<string, unknown>)['__ogmRceProbeTxtWrite'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeTxtWrite = true), "x") }',
-      '---',
-      'original body',
-    ].join('\n');
-    await fx.collabWrite('MaliciousW.txt', payload, 'collab: add malicious note');
-
-    const preRemote = await fx.bareHead();
-    const res = await callTool(srv.client, 'patch_note', {
-      path: 'MaliciousW.txt',
-      oldString: 'original body',
-      newString: 'pwned',
-    });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeTxtWrite']).toBe(false);
-    await expectRemoteUnchanged(fx, preRemote);
-  });
-
-  it('patch_note refuses a .base note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    (globalThis as Record<string, unknown>)['__ogmRceProbeBaseWrite'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeBaseWrite = true), "x") }',
-      '---',
-      'original body',
-    ].join('\n');
-    await fx.collabWrite('MaliciousW.base', payload, 'collab: add malicious note');
-
-    const preRemote = await fx.bareHead();
-    const res = await callTool(srv.client, 'patch_note', {
-      path: 'MaliciousW.base',
-      oldString: 'original body',
-      newString: 'pwned',
-    });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeBaseWrite']).toBe(false);
-    await expectRemoteUnchanged(fx, preRemote);
-  });
-
-  it('patch_note refuses a .canvas note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
-    (globalThis as Record<string, unknown>)['__ogmRceProbeCanvasWrite'] = false;
-    const payload = [
-      '---js',
-      'module.exports = { t: ((globalThis.__ogmRceProbeCanvasWrite = true), "x") }',
-      '---',
-      'original body',
-    ].join('\n');
-    await fx.collabWrite('MaliciousW.canvas', payload, 'collab: add malicious note');
-
-    const preRemote = await fx.bareHead();
-    const res = await callTool(srv.client, 'patch_note', {
-      path: 'MaliciousW.canvas',
-      oldString: 'original body',
-      newString: 'pwned',
-    });
-    expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeCanvasWrite']).toBe(false);
-    await expectRemoteUnchanged(fx, preRemote);
-  });
+      const preRemote = await fx.bareHead();
+      const res = await callTool(srv.client, 'patch_note', {
+        path: file,
+        oldString: 'original body',
+        newString: 'pwned',
+      });
+      expect(res.isError).toBe(true);
+      expect((globalThis as Record<string, unknown>)[probeKey]).toBe(false);
+      await expectRemoteUnchanged(fx, preRemote);
+    },
+  );
 
   it('read_multiple_notes is refused wholesale when one path targets .git', async () => {
     // MCPVault denies the individual path internally but reports it in a non-error "err"

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -16,6 +17,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyCloneDiff,
+  cloneWorktree,
   COPY_CHUNK_SIZE,
   manifestOf,
   type Manifest,
@@ -210,6 +212,49 @@ describe('applyCloneDiff symlink safety', () => {
     expect(existsSync(join(outside, 'target.md'))).toBe(true);
     expect(await readdir(outside)).toEqual(['target.md']);
   });
+});
+
+describe('cloneWorktree failure cleanup', () => {
+  let tmpRoot: string;
+  let vaultPath: string;
+  let savedTmpdir: string | undefined;
+
+  beforeEach(async () => {
+    // Redirect os.tmpdir() at the source (cloneWorktree hard-codes tmpdir()) so the only
+    // ogm-stage-* dir under it is the one cloneWorktree creates — the assertion can then read
+    // the whole dir and prove no stage leaked.
+    tmpRoot = await mkdtemp(join(tmpdir(), 'ogm-clone-cleanup-'));
+    savedTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = tmpRoot;
+    vaultPath = join(tmpRoot, 'vault');
+    await mkdir(vaultPath);
+  });
+
+  afterEach(async () => {
+    if (savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmpdir;
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  // Skipped as root, where a 0000 file stays readable and cp would never fail.
+  it.skipIf(process.getuid?.() === 0)(
+    'removes its mkdtemp dir when copying an entry fails',
+    async () => {
+      // A readable note copies fine; an unreadable one makes cp() throw partway through the
+      // top-level copy loop. cloneWorktree already created its 0700 mkdtemp dir by then, and
+      // the sole caller only binds `stage` (and its finally-rm) on a successful return — so a
+      // throw here must clean up after itself or orphan a temp dir holding partial vault content.
+      await writeFile(join(vaultPath, 'readable.md'), '# ok\n');
+      const secret = join(vaultPath, 'secret.md');
+      await writeFile(secret, '# secret\n');
+      await chmod(secret, 0o000);
+
+      await expect(cloneWorktree(vaultPath)).rejects.toThrow();
+
+      const leftovers = (await readdir(tmpRoot)).filter((n) => n.startsWith('ogm-stage-'));
+      expect(leftovers).toEqual([]);
+    },
+  );
 });
 
 describe('manifestOf nested tree', () => {

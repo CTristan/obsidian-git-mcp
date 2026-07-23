@@ -8,6 +8,7 @@ import {
   open,
   readdir,
   realpath,
+  rm,
   rmdir,
   stat,
   unlink,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { mapWithConcurrency } from './concurrency.js';
 import { forbiddenPathReason } from './paths.js';
 
 /**
@@ -65,9 +67,17 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
     verbatimSymlinks: true,
     mode: constants.COPYFILE_FICLONE,
   } as const;
-  for (const entry of await readdir(vaultPath)) {
-    if (entry === '.git' || entry === '.obsidian') continue;
-    await cp(join(vaultPath, entry), join(dir, entry), opts);
+  try {
+    for (const entry of await readdir(vaultPath)) {
+      if (entry === '.git' || entry === '.obsidian') continue;
+      await cp(join(vaultPath, entry), join(dir, entry), opts);
+    }
+  } catch (err) {
+    // The caller only binds `stage` (and its finally-rm) on a successful return, so a throw
+    // here would orphan the 0700 dir holding partial vault content. Clean up before rethrowing
+    // so the contract is "returns a cleanable dir, or leaves nothing behind."
+    await rm(dir, { recursive: true, force: true });
+    throw err;
   }
   return dir;
 }
@@ -87,31 +97,27 @@ export async function manifestOf(dir: string): Promise<Manifest> {
     // directory from recursion and record a real symlink with isSymlink: false.
     const names = await readdir(cur);
     // Every entry's lstat (and any recursive walk it triggers) is independent of every other's,
-    // so batch them through Promise.all instead of awaiting one at a time — otherwise scan
-    // latency scales linearly with the vault's file count. Slice into DIR_CONCURRENCY-sized
-    // waves so a huge flat directory can't fan out into thousands of simultaneous lstats.
-    for (let i = 0; i < names.length; i += DIR_CONCURRENCY) {
-      await Promise.all(
-        names.slice(i, i + DIR_CONCURRENCY).map(async (name) => {
-          const abs = join(cur, name);
-          const rel = prefix === '' ? name : `${prefix}/${name}`;
-          // lstat, never stat, drives both the recurse decision and isSymlink: a symlink to a
-          // directory reports isDirectory() false / isSymbolicLink() true, so it's recorded as
-          // a link here, not descended into — the walk never leaves the tree it started in.
-          const st = await lstat(abs, { bigint: true });
-          if (st.isDirectory()) {
-            await walk(abs, rel);
-            return;
-          }
-          manifest.set(rel, {
-            size: st.size,
-            mtimeNs: st.mtimeNs,
-            ino: st.ino,
-            isSymlink: st.isSymbolicLink(),
-          });
-        }),
-      );
-    }
+    // so run them through mapWithConcurrency instead of awaiting one at a time — otherwise scan
+    // latency scales linearly with the vault's file count. The DIR_CONCURRENCY cap keeps a huge
+    // flat directory from fanning out into thousands of simultaneous lstats.
+    await mapWithConcurrency(names, DIR_CONCURRENCY, async (name) => {
+      const abs = join(cur, name);
+      const rel = prefix === '' ? name : `${prefix}/${name}`;
+      // lstat, never stat, drives both the recurse decision and isSymlink: a symlink to a
+      // directory reports isDirectory() false / isSymbolicLink() true, so it's recorded as
+      // a link here, not descended into — the walk never leaves the tree it started in.
+      const st = await lstat(abs, { bigint: true });
+      if (st.isDirectory()) {
+        await walk(abs, rel);
+        return;
+      }
+      manifest.set(rel, {
+        size: st.size,
+        mtimeNs: st.mtimeNs,
+        ino: st.ino,
+        isSymlink: st.isSymbolicLink(),
+      });
+    });
   };
   await walk(dir, '');
   return manifest;

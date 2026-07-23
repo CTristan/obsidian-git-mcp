@@ -1,3 +1,4 @@
+import { PathFilter } from '@bitbonsai/mcpvault';
 import { describe, expect, it } from 'vitest';
 import { forbiddenPathReason } from '../../src/paths.js';
 
@@ -56,5 +57,33 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('note.md:payload')).toBeDefined();
     expect(forbiddenPathReason('foo/.obsidian:x/bar')).toBeDefined();
     expect(forbiddenPathReason('Some Note.md')).toBeUndefined();
+  });
+});
+
+describe('canonicalization drift guard', () => {
+  it('refuses every restricted spelling MCPVault folds to a restricted segment', () => {
+    // paths.ts mirrors MCPVault's per-segment trailing-dot/space fold as a second
+    // defense (paths.ts:40), but that mirror was unguarded -- a MCPVault upgrade that
+    // widens the fold would silently desync the two layers. canonicalizeForMatch is
+    // `private` only at the TypeScript layer; MCPVault compiles to a plain-JS prototype
+    // method, so the cast below invokes the real runtime fold PathFilter applies before
+    // matching its deny-list. We derive the truth set from MCPVault itself: any spelling
+    // it folds back to ".git"/".obsidian" is one MCPVault treats as restricted, so the
+    // wrapper's second-defense layer must refuse it too. If a future fold widens and the
+    // mirror stays put, the new spellings go red here instead of quietly desyncing.
+    const filter = new PathFilter() as unknown as {
+      canonicalizeForMatch(path: string): string;
+    };
+    const restricted = ['.git', '.obsidian'];
+    const decorations = ['', '.', ' ', '..', '  ', '. ', ' .', '. .', ' . '];
+    for (const name of restricted) {
+      for (const lead of decorations) {
+        for (const trail of decorations) {
+          const segment = `${lead}${name}${trail}`;
+          if (filter.canonicalizeForMatch(segment).toLowerCase() !== name) continue;
+          expect(forbiddenPathReason(`${segment}/note.md`)).toBeDefined();
+        }
+      }
+    }
   });
 });
