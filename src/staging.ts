@@ -259,7 +259,10 @@ export async function openPinnedHandle(
       throw makeMismatchError('path changed during the write');
     }
   } catch (err) {
-    await handle.close();
+    // Swallow a close() failure so it can't clobber `err` — the mismatch (or open-time error)
+    // is the real cause the caller and rollback logic must see, and a leaked fd on this rare
+    // failure path costs far less than hiding why the pin check failed.
+    await handle.close().catch(() => {});
     throw err;
   }
   return handle;
@@ -298,10 +301,13 @@ async function writeIntoVault(
       await handle.truncate(0);
       await streamCopy(source, handle);
     } finally {
-      await source.close();
+      // Swallow a close() failure so it can't clobber a streamCopy/truncate error — the write
+      // failure (e.g. ENOSPC) is the real cause the caller and rollback logic must see, and a
+      // leaked fd on this rare path costs far less than masking why the write failed.
+      await source.close().catch(() => {});
     }
   } finally {
-    await handle.close();
+    await handle.close().catch(() => {});
   }
 }
 

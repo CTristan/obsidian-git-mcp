@@ -8,6 +8,7 @@ import {
   commitShaOf,
   expectRolledBack,
   headShaOf,
+  snapshot,
   startServer,
   textOf,
   type TestServer,
@@ -29,8 +30,7 @@ describe('transaction safety', () => {
 
   it('a write containing conflict markers is rejected and rolled back', async () => {
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Bad.md',
@@ -46,8 +46,7 @@ describe('transaction safety', () => {
     // .markdown is as much a note extension as .md (MCPVault's PathFilter accepts both),
     // so validateChangedFile must cover it too, not just the shorter extension.
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Bad.markdown',
@@ -65,8 +64,7 @@ describe('transaction safety', () => {
     // extension check must match case-insensitively too, or a mixed-case note skips
     // validateNoteContent entirely and an unvalidated write reaches the remote.
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Bad.MD',
@@ -84,8 +82,7 @@ describe('transaction safety', () => {
     // path — never the .md inside it — and commit the note unvalidated. The note must be
     // refused exactly as one in an existing folder is.
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'BrandNew/Bad.md',
@@ -99,8 +96,7 @@ describe('transaction safety', () => {
 
   it('broken frontmatter YAML never reaches the remote', async () => {
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Broken.md',
@@ -228,8 +224,7 @@ describe('transaction safety', () => {
         },
       },
     });
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Doomed.md',
@@ -375,8 +370,7 @@ describe('transaction safety', () => {
     await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
 
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
-    const preRemote = await fx.bareHead();
+    const { preHead, preRemote } = await snapshot(fx);
 
     const res = await callTool(srv.client, 'write_note', {
       path: 'private/notes.md',

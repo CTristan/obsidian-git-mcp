@@ -75,6 +75,13 @@ export function headShaOf(result: CallToolResult): string {
   return String((result._meta ?? {})['headSha'] ?? '');
 }
 
+/** Snapshot the checkout HEAD and remote tip before an expected-failure write, so the rollback can be asserted against the pre-write state. */
+export async function snapshot(fx: Fixture): Promise<{ preHead: string; preRemote: string }> {
+  const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+  const preRemote = await fx.bareHead();
+  return { preHead, preRemote };
+}
+
 /** The refusal must roll the local checkout back too, not just leave the remote alone. */
 export async function expectRolledBack(fx: Fixture, preRemote: string, preHead: string): Promise<void> {
   expect(await fx.bareHead()).toBe(preRemote);

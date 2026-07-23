@@ -60,6 +60,12 @@ describe('mapWithConcurrency', () => {
     expect(started).not.toContain(5);
   });
 
+  it('rejects a non-positive or non-integer concurrency with RangeError', async () => {
+    for (const bad of [0, -1, 1.5, NaN]) {
+      await expect(mapWithConcurrency([1, 2, 3], bad, async (n) => n)).rejects.toThrow(RangeError);
+    }
+  });
+
   it('returns an empty array for empty input without calling fn', async () => {
     let called = false;
     const results = await mapWithConcurrency([], 64, async () => {

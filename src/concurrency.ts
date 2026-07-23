@@ -16,6 +16,9 @@ export async function mapWithConcurrency<T, R>(
   concurrency: number,
   fn: (item: T) => Promise<R>,
 ): Promise<R[]> {
+  if (!Number.isInteger(concurrency) || concurrency <= 0) {
+    throw new RangeError(`concurrency must be a positive integer, got ${concurrency}`);
+  }
   const results: R[] = [];
   for (let i = 0; i < items.length; i += concurrency) {
     const wave = await Promise.all(items.slice(i, i + concurrency).map((item) => fn(item)));

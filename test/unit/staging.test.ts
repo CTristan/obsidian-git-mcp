@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { constants, existsSync, type Stats } from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import {
   chmod,
   lstat,
@@ -11,17 +12,22 @@ import {
   rm,
   symlink,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyCloneDiff,
   cloneWorktree,
   COPY_CHUNK_SIZE,
   manifestOf,
+  openPinnedHandle,
+  writeAllAt,
   type Manifest,
 } from '../../src/staging.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 describe('applyCloneDiff symlink safety', () => {
   let root: string;
@@ -59,7 +65,7 @@ describe('applyCloneDiff symlink safety', () => {
 
     await expect(
       applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
-    ).rejects.toThrow(/non-directory|outside the vault|path changed/);
+    ).rejects.toThrow(/refusing to write through a non-directory/);
     // Nothing was created at the external target.
     expect(existsSync(join(outside, 'new.md'))).toBe(false);
     expect(await readdir(outside)).toEqual([]);
@@ -80,7 +86,7 @@ describe('applyCloneDiff symlink safety', () => {
 
     await expect(
       applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
-    ).rejects.toThrow(/non-directory|outside the vault|path changed/);
+    ).rejects.toThrow(/refusing to delete through a non-directory/);
     // The external file survived — the delete never followed the swapped symlink.
     expect(existsSync(join(outside, 'old.md'))).toBe(true);
   });
@@ -334,5 +340,99 @@ describe('applyCloneDiff copy-back streaming', () => {
     const written = await readFile(join(vaultPath, 'attachments', 'big.bin'));
     expect(written.length).toBe(payload.length);
     expect(Buffer.compare(written, payload)).toBe(0);
+  });
+});
+
+describe('writeAllAt short-write resilience', () => {
+  it('keeps writing until the whole buffer lands when a write reports a short count', async () => {
+    // A single FileHandle.write can report a short write on a regular file, so writeAllAt must
+    // loop on the reported byte count rather than assume one call drains the buffer. A fake
+    // handle forces the first write to place a single byte, then reassembly of what landed at
+    // each offset proves the loop finished the buffer — a truncated fragment fails the compare.
+    const payload = Buffer.from('the whole payload has to land byte for byte at each offset\n');
+    const landed = Buffer.alloc(payload.length);
+    let calls = 0;
+    const fakeHandle = {
+      write: async (buffer: Buffer, offset: number, length: number, position: number) => {
+        const toWrite = calls === 0 ? 1 : length;
+        calls++;
+        buffer.copy(landed, position, offset, offset + toWrite);
+        return { bytesWritten: toWrite, buffer };
+      },
+    } as unknown as FileHandle;
+
+    await writeAllAt(fakeHandle, payload);
+
+    expect(Buffer.compare(landed, payload)).toBe(0);
+    // The forced short first write means writeAllAt had to issue at least one more call.
+    expect(calls).toBeGreaterThan(1);
+  });
+});
+
+describe('openPinnedHandle path pinning', () => {
+  let root: string;
+  const writeFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'ogm-pin-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('returns a usable handle pinned to a regular file on the happy path', async () => {
+    const target = join(root, 'note.md');
+    await writeFile(target, 'seed\n');
+    const expectedReal = await realpath(target);
+
+    const handle = await openPinnedHandle(
+      target,
+      target,
+      expectedReal,
+      writeFlags,
+      (message) => new Error(message),
+    );
+    try {
+      await handle.truncate(0);
+      await writeAllAt(handle, Buffer.from('written through the pinned handle\n'));
+    } finally {
+      await handle.close();
+    }
+
+    expect(await readFile(target, 'utf8')).toBe('written through the pinned handle\n');
+  });
+
+  it('refuses when the resolved path no longer matches the expected canonical path', async () => {
+    // The realpath re-resolution guard: what we opened must still canonicalize to exactly the
+    // path the caller pinned. Point expectedReal at a different real file so resolution
+    // disagrees, standing in for a symlink swapped into the chain between resolve and open.
+    const target = join(root, 'note.md');
+    const decoy = join(root, 'decoy.md');
+    await writeFile(target, 'seed\n');
+    await writeFile(decoy, 'decoy\n');
+    const wrongReal = await realpath(decoy);
+
+    await expect(
+      openPinnedHandle(target, target, wrongReal, writeFlags, (message) => new Error(message)),
+    ).rejects.toThrow(/path changed during the write/);
+  });
+
+  it('refuses when the open handle and the pinned path resolve to different inodes', async () => {
+    // The dev/ino guard catches what a realpath match can't: a same-name regular file unlinked
+    // and recreated resolves identically, so only comparing the open fd's inode against a fresh
+    // stat of the pinned path spots the swap. Force stat() to report a foreign inode while
+    // realpath still agrees, and the pin must refuse.
+    const target = join(root, 'note.md');
+    await writeFile(target, 'seed\n');
+    const expectedReal = await realpath(target);
+
+    vi.mocked(fsPromises.stat).mockImplementationOnce(
+      () => Promise.resolve({ dev: -1, ino: -1 } as unknown as Stats),
+    );
+
+    await expect(
+      openPinnedHandle(target, target, expectedReal, writeFlags, (message) => new Error(message)),
+    ).rejects.toThrow(/path changed during the write/);
   });
 });
