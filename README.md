@@ -20,7 +20,7 @@ The full build-vs-wrap evaluation — why the server wraps MCPVault instead of f
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git
@@ -43,6 +43,8 @@ The checkout is the server's workspace: on startup it discards any leftover cras
 ```sh
 OGM_COLLABORATOR="Your Name" node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
+
+That example assumes your vault's canonical branch is `main` — set `OGM_BRANCH` to your branch name if it differs, because the startup sync fetches and fast-forwards that branch and fails against one that doesn't exist.
 
 The server speaks MCP over stdio. Configuration comes from environment variables:
 
