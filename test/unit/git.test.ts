@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -75,5 +76,47 @@ describe('runGit timeout', () => {
 
     expect(err).toBeInstanceOf(GitError);
     expect(elapsed).toBeLessThan(15_000);
+  });
+});
+
+describe('runGit host hook neutralization', () => {
+  let dir: string;
+  let hooksDir: string;
+  let markerPath: string;
+  let globalConfig: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ogm-git-repo-'));
+    hooksDir = await mkdtemp(join(tmpdir(), 'ogm-git-hooks-'));
+    markerPath = join(hooksDir, 'pre-commit-ran');
+    // A hostile host hook: it would fire on every server-driven commit and record here
+    // that it ran. It exits 0 so the commit still succeeds — the marker, not a failed
+    // commit, is what proves whether host-configured hook code executed.
+    const hook = join(hooksDir, 'pre-commit');
+    await writeFile(hook, `#!/bin/sh\necho ran > "${markerPath}"\nexit 0\n`);
+    await chmod(hook, 0o755);
+    // Simulate the host's global git config leaking a core.hooksPath (plus the identity a
+    // commit needs), the exact config layer a server-driven git command inherits.
+    globalConfig = join(hooksDir, 'gitconfig');
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[core]\n\thooksPath = ${hooksDir}\n`,
+    );
+    await runGit(['init', '.'], dir);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(hooksDir, { recursive: true, force: true });
+  });
+
+  it('does not run a core.hooksPath hook inherited from host git config', async () => {
+    // core.hooksPath from any config layer makes a server commit execute arbitrary host
+    // code. runGit must neutralize it per-invocation, so this commit completes and leaves
+    // no marker even though the (simulated) host global config points straight at the hook.
+    await runGit(['commit', '--allow-empty', '-m', 'probe'], dir, {
+      env: { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' },
+    });
+    expect(existsSync(markerPath)).toBe(false);
   });
 });

@@ -33,6 +33,13 @@ export interface GitOptions {
   timeoutMs?: number;
 }
 
+// Server-side git must never execute host-configured hook code: a global or system
+// core.hooksPath would make every fetch/push/commit run arbitrary hooks off the host. A
+// command-line -c outranks every config layer, and /dev/null is never a directory, so no
+// hook path resolved beneath it can ever exist. We can't wipe global/system config wholesale
+// instead — that would drop the user's credential.helper and break authenticated pushes.
+const DISABLE_HOOKS = ['-c', 'core.hooksPath=/dev/null'];
+
 /**
  * Run a git command via execFile with an argument array — never a shell string — so
  * note paths and commit messages can't inject anything. GIT_TERMINAL_PROMPT=0 because
@@ -44,7 +51,7 @@ export async function runGit(
   options: GitOptions = {},
 ): Promise<string> {
   try {
-    const { stdout } = await exec('git', args, {
+    const { stdout } = await exec('git', [...DISABLE_HOOKS, ...args], {
       cwd,
       // GIT_TERMINAL_PROMPT last so no caller can re-enable interactive prompts.
       env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: '0' },

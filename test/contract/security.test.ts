@@ -243,12 +243,14 @@ describe('security', () => {
     );
 
     const before = await readFile(join(fx.serverDir, '.git', 'config'), 'utf8');
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'write_note', {
       path: 'Hop1.md',
       content: 'PWNED',
     });
     expect(res.isError).toBe(true);
     expect(await readFile(join(fx.serverDir, '.git', 'config'), 'utf8')).toBe(before);
+    await expectRemoteUnchanged(fx, preRemote);
     await expectCleanWorkingTree(fx);
   });
 
