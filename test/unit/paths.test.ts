@@ -3,6 +3,7 @@ import { forbiddenPathReason } from '../../src/paths.js';
 
 describe('forbiddenPathReason', () => {
   it('refuses traversal, absolute paths, and restricted directories', () => {
+    expect(forbiddenPathReason('')).toBeDefined();
     expect(forbiddenPathReason('../outside.md')).toBeDefined();
     // Interior traversal too — normalize() would silently collapse it, and the
     // contract is that '..' never appears in an accepted path.

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -98,10 +99,12 @@ describe('applyCloneDiff symlink safety', () => {
     expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
   });
 
-  it('deletes a legitimate pre-existing symlink entry', async () => {
+  it('deletes a legitimate pre-existing symlink entry without touching its target', async () => {
     // manifestOf records any pre-existing vault symlink with isSymlink: true. Removing one
     // in the clone must actually delete the in-vault link, not refuse it as if it were an
-    // escape attempt.
+    // escape attempt — and unlink must drop only the link, never follow it to disturb the
+    // target directory it points at.
+    await writeFile(join(outside, 'keep.md'), '# Keep\n');
     await symlink(outside, join(vaultPath, 'Link.md'));
 
     const before: Manifest = new Map([
@@ -112,6 +115,67 @@ describe('applyCloneDiff symlink safety', () => {
     await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
 
     expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
+    // The link target directory and its contents survived — the delete never followed the link.
+    expect(existsSync(outside)).toBe(true);
+    expect(existsSync(join(outside, 'keep.md'))).toBe(true);
+    expect(await readFile(join(outside, 'keep.md'), 'utf8')).toBe('# Keep\n');
+  });
+
+  it('removes now-empty parent directories after cascading deletes', async () => {
+    // Deleting every file under a nested subtree should carry the now-empty intermediate dirs
+    // out of the live vault too, but stop at the first non-empty ancestor and never touch the
+    // vault root.
+    await mkdir(join(vaultPath, 'parent', 'deep', 'sub'), { recursive: true });
+    await writeFile(join(vaultPath, 'parent', 'deep', 'sub', 'a.md'), '# A\n');
+    await writeFile(join(vaultPath, 'parent', 'deep', 'sub', 'b.md'), '# B\n');
+    await writeFile(join(vaultPath, 'parent', 'keep.md'), '# Keep\n');
+
+    const keep = { size: 7n, mtimeNs: 1n, ino: 3n, isSymlink: false };
+    const before: Manifest = new Map([
+      ['parent/deep/sub/a.md', { size: 4n, mtimeNs: 1n, ino: 1n, isSymlink: false }],
+      ['parent/deep/sub/b.md', { size: 4n, mtimeNs: 1n, ino: 2n, isSymlink: false }],
+      ['parent/keep.md', keep],
+    ]);
+    const after: Manifest = new Map([['parent/keep.md', keep]]);
+
+    await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
+
+    // The emptied subtree is gone up to — but not including — the first non-empty ancestor.
+    expect(existsSync(join(vaultPath, 'parent', 'deep', 'sub'))).toBe(false);
+    expect(existsSync(join(vaultPath, 'parent', 'deep'))).toBe(false);
+    // `parent` still holds keep.md, and the vault root is never an rmdir candidate.
+    expect(existsSync(join(vaultPath, 'parent', 'keep.md'))).toBe(true);
+    expect(existsSync(join(vaultPath, 'parent'))).toBe(true);
+    expect(existsSync(vaultPath)).toBe(true);
+  });
+
+  it('never follows or removes a symlinked directory while cleaning up', async () => {
+    // A pre-existing symlink-to-directory sits beside a subtree whose last file is deleted. The
+    // emptied leaf dir goes away, but the symlink keeps its parent non-empty, so cleanup must
+    // leave that parent, the link itself, and the link's target directory all untouched — rmdir
+    // must never follow the link to delete what it points at.
+    await writeFile(join(outside, 'target.md'), '# Target\n');
+    await mkdir(join(vaultPath, 'area', 'deep'), { recursive: true });
+    await writeFile(join(vaultPath, 'area', 'deep', 'a.md'), '# A\n');
+    await symlink(outside, join(vaultPath, 'area', 'linkdir'));
+
+    const link = { size: 0n, mtimeNs: 1n, ino: 9n, isSymlink: true };
+    const before: Manifest = new Map([
+      ['area/deep/a.md', { size: 4n, mtimeNs: 1n, ino: 1n, isSymlink: false }],
+      ['area/linkdir', link],
+    ]);
+    const after: Manifest = new Map([['area/linkdir', link]]);
+
+    await applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after);
+
+    // The emptied leaf dir went away...
+    expect(existsSync(join(vaultPath, 'area', 'deep'))).toBe(false);
+    // ...but `area` stayed (the symlink keeps it non-empty), and the symlink itself and its
+    // target were never followed or removed.
+    expect(existsSync(join(vaultPath, 'area'))).toBe(true);
+    expect((await lstat(join(vaultPath, 'area', 'linkdir'))).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(outside, 'target.md'))).toBe(true);
+    expect(await readdir(outside)).toEqual(['target.md']);
   });
 });
 

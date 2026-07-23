@@ -8,6 +8,7 @@ import {
   open,
   readdir,
   realpath,
+  rmdir,
   stat,
   unlink,
   type FileHandle,
@@ -296,13 +297,19 @@ async function writeIntoVault(
  * Delete rel's target from vaultPath without ever following a symlink standing in for a
  * parent directory. Walks each parent segment exactly like mkdirNoFollow — refusing a
  * symlink or non-directory anywhere in the chain — then confirms the resolved *parent*
- * still lands at the canonical vault location before unlinking, closing the same
- * swapped-parent window openPinnedHandle closes for writes. The check deliberately stops at
- * the parent: realpath(target) would follow rel's own symlink to its target, which is never
- * the same as rel's own canonical path, so resolving the entry itself would make deleting
- * any legitimate pre-existing vault symlink fail every time. unlink() itself never follows
- * a symlink at the final segment, so a deleted entry that was a symlink drops only the
- * in-vault link, never whatever it pointed at.
+ * still lands at the canonical vault location before unlinking. Unlike openPinnedHandle,
+ * this only narrows the swapped-parent window, it can't close it: openPinnedHandle binds an
+ * fd first and verifies second, so tampering after the open can't redirect the already-bound
+ * fd — but here we verify first (realpath the parent) and then run a path-based unlink, and
+ * Node's fs.promises has no unlinkat-style dirfd-relative delete to bind the unlink to a
+ * validated directory handle. That leaves a check-to-syscall gap in which a same-uid racer
+ * could swap the parent for a symlink and make unlink resolve through it — the same residual
+ * same-uid risk writeIntoVault acknowledges, theoretically possible because nothing userland
+ * eliminates a same-uid attacker. The check deliberately stops at the parent: realpath(target)
+ * would follow rel's own symlink to its target, which is never the same as rel's own canonical
+ * path, so resolving the entry itself would make deleting any legitimate pre-existing vault
+ * symlink fail every time. unlink() itself never follows a symlink at the final segment, so a
+ * deleted entry that was a symlink drops only the in-vault link, never whatever it pointed at.
  */
 async function unlinkNoFollow(
   vaultPath: string,
@@ -332,13 +339,62 @@ async function unlinkNoFollow(
 }
 
 /**
+ * Best-effort removal of directories the delete pass emptied, so a subtree whose last files
+ * were deleted doesn't leave hollow directories drifting against the clone. Each deleted
+ * entry's parent chain is walked from the deepest segment upward and stops strictly before
+ * the vault root, and candidates are processed deepest-first so a child is gone before its
+ * parent is tried — otherwise the parent is never empty yet. This is cosmetic, because
+ * manifestOf records only files and symlinks, never directories, so a leftover empty dir is
+ * drift, not a semantic error — which is why every failure here is swallowed: the file delete
+ * already carried the transaction's meaning, and a cleanup hiccup must never fail a write
+ * whose deletes all succeeded.
+ *
+ * rmdir is the only tool used, and its own semantics carry the safety. It fails ENOTEMPTY on
+ * a populated directory, so there's no check-then-delete race on emptiness, and ENOTDIR on a
+ * symlink, so it never follows a link at the final segment. The realpath guard before each
+ * call rejects a candidate whose resolved path escaped the vault — catching a parent swapped
+ * for a symlink between the delete pass and here, which rmdir's final-segment check alone
+ * wouldn't see.
+ */
+async function removeEmptyParentDirs(
+  vaultPath: string,
+  realVaultPath: string,
+  deleted: Iterable<string>,
+): Promise<void> {
+  const candidates = new Set<string>();
+  for (const rel of deleted) {
+    let dir = dirname(rel);
+    while (dir !== '.' && dir !== '' && dir !== '/') {
+      candidates.add(dir);
+      dir = dirname(dir);
+    }
+  }
+  const deepestFirst = [...candidates].sort(
+    (a, b) => b.split('/').length - a.split('/').length,
+  );
+  for (const dirRel of deepestFirst) {
+    const abs = join(vaultPath, dirRel);
+    try {
+      if ((await realpath(abs)) !== join(realVaultPath, dirRel)) continue;
+      await rmdir(abs);
+    } catch {
+      // ENOTEMPTY (still holds entries), ENOENT (already gone), ENOTDIR (a symlink stood in
+      // for it), EBUSY, and anything else are all fine to ignore — the delete already carried
+      // the transaction's meaning, so cleanup is allowed to give up quietly.
+    }
+  }
+}
+
+/**
  * Reconcile the real vault against a delegated write that ran in the clone: copy every
  * changed/added file back through fd-pinned writes, and remove every deleted one. A
  * changed/added entry that is a symlink is refused outright — MCPVault never creates or
  * rewrites symlinks, so one appearing in the diff is tampering, not a legitimate write
  * (an unchanged in-vault symlink the write merely resolved *through* never enters the
- * diff, so it stays untouched). This and appendTool (server.ts) are the only two paths
- * that mutate the real vault, and both do so exclusively through openPinnedHandle above.
+ * diff, so it stays untouched). After the deletes, best-effort cleanup removes any directory
+ * they emptied so the live tree doesn't drift from the clone. This and appendTool (server.ts)
+ * are the only two paths that mutate the real vault, and both do so exclusively through
+ * openPinnedHandle above.
  */
 export async function applyCloneDiff(
   vaultPath: string,
@@ -354,15 +410,17 @@ export async function applyCloneDiff(
     }
     await writeIntoVault(vaultPath, realVaultPath, cloneDir, rel);
   }
+  const deleted: string[] = [];
   for (const rel of before.keys()) {
     if (after.has(rel)) continue;
-    // Tolerate a path that already vanished anywhere along the walk (a concurrent
-    // removal) rather than failing the write.
     try {
       await unlinkNoFollow(vaultPath, realVaultPath, rel);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw err;
+      // Tolerate a path that already vanished anywhere along the walk (a concurrent
+      // removal) rather than failing the write; anything else is real and re-thrown.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
+    deleted.push(rel);
   }
+  await removeEmptyParentDirs(vaultPath, realVaultPath, deleted);
 }
