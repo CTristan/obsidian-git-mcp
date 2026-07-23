@@ -5,6 +5,12 @@ import { isAbsolute, normalize } from 'node:path';
 // because trusting a single layer means one bypass loses the vault.
 const RESTRICTED_SEGMENTS = new Set(['.obsidian', '.git']);
 
+// Windows reserves CON, PRN, AUX, NUL, COM1-COM9, and LPT1-LPT9 as device names with any
+// extension, so "NUL.md" still resolves to the device and the write silently drops instead
+// of touching the vault file. The reservation is on the base name (the part before the
+// first dot), matched case-insensitively after the same trailing-dot/space fold.
+const RESERVED_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
 /** Returns a human-readable refusal reason, or undefined when the path is acceptable. */
 export function forbiddenPathReason(path: string): string | undefined {
   if (path === '') return 'empty path';
@@ -40,6 +46,9 @@ export function forbiddenPathReason(path: string): string | undefined {
     const folded = segment.replace(/^ +/, '').replace(/[. ]+$/, '');
     if (RESTRICTED_SEGMENTS.has(folded.toLowerCase())) {
       return `paths under ${segment} are not allowed`;
+    }
+    if (RESERVED_DEVICE_NAME.test(folded)) {
+      return 'Windows reserved device names are not allowed';
     }
   }
   return undefined;

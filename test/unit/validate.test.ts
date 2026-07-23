@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { validateNoteContent, ValidationError } from '../../src/validate.js';
+import {
+  refuseExecutableFrontmatter,
+  validateNoteContent,
+  ValidationError,
+} from '../../src/validate.js';
 
 describe('validateNoteContent', () => {
   it('rejects content containing a NUL byte', () => {
@@ -129,5 +133,65 @@ describe('validateNoteContent', () => {
       'body',
     ].join('\n');
     expect(() => validateNoteContent('Note.md', payload)).toThrow(ValidationError);
+  });
+});
+
+describe('refuseExecutableFrontmatter', () => {
+  it('refuses executable JavaScript frontmatter on the read path instead of running it', () => {
+    // gray-matter merges its default js/javascript engines back in on every read, so a note
+    // fetched from the remote carrying `---js` is remote code execution the moment MCPVault
+    // parses it. This guard must refuse the engine first, and the payload must never run.
+    (globalThis as Record<string, unknown>)['__validateProbe'] = false;
+    const payload = [
+      '---js',
+      'module.exports = { t: ((globalThis.__validateProbe = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    expect(() => refuseExecutableFrontmatter('Note.md', payload)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+    // The refusal reports what it is, prefixed with the note path.
+    expect(() => refuseExecutableFrontmatter('Note.md', payload)).toThrow(
+      /Note\.md: js frontmatter is not allowed/,
+    );
+    // The `javascript` alias reaches the same refusing engine.
+    const aliased = payload.replace('---js', '---javascript');
+    expect(() => refuseExecutableFrontmatter('Note.md', aliased)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+  });
+
+  it('refuses a mixed-case ---JS frontmatter tag instead of running it', () => {
+    // gray-matter lowercases the language tag before the engine lookup, so `---JS` still
+    // resolves to the refusing engine — locking that in against a case-variant bypass.
+    (globalThis as Record<string, unknown>)['__validateProbe'] = false;
+    const payload = [
+      '---JS',
+      'module.exports = { t: ((globalThis.__validateProbe = true), "x") }',
+      '---',
+      'body',
+    ].join('\n');
+    expect(() => refuseExecutableFrontmatter('Note.md', payload)).toThrow(ValidationError);
+    expect((globalThis as Record<string, unknown>)['__validateProbe']).toBe(false);
+  });
+
+  it('accepts valid frontmatter', () => {
+    expect(() =>
+      refuseExecutableFrontmatter('Note.md', '---\ntitle: test\ntags: [project]\n---\nBody text.\n'),
+    ).not.toThrow();
+  });
+
+  it('accepts plain content with no frontmatter at all', () => {
+    expect(() =>
+      refuseExecutableFrontmatter('Note.md', 'Just a body, no frontmatter.\n'),
+    ).not.toThrow();
+  });
+
+  it('leaves a non-engine YAML parse failure alone', () => {
+    // Unlike the write path, a malformed-but-not-executable note already on the remote isn't
+    // this guard's to reject: it swallows the plain YAML parse error so MCPVault hits the same
+    // failure and reports it on its own terms. Only an engine refusal propagates.
+    expect(() =>
+      refuseExecutableFrontmatter('Note.md', '---\ntitle: [unclosed\n---\nBody\n'),
+    ).not.toThrow();
   });
 });

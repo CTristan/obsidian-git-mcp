@@ -379,22 +379,34 @@ export class Transactor {
     // A crashed process can't release its lock, and the lock lives in .git/ where tree
     // recovery never looks — but only a DEAD holder's lock is safe to clear.
     await this.releaseStaleLock();
-    await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
-      timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-    });
-    this.lastFetchAt = Date.now();
-    const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';
-    if ((await this.isDirty()) || unpushed) {
-      await this.git(['rebase', '--abort']).catch(() => {});
-      await this.git(['reset', '--hard', this.target()]);
-      await this.git(['clean', '-fd']);
-    } else {
-      await this.git(['merge', '--ff-only', this.target()]);
+    // Hold the same on-disk lock transact() and readTransaction() take, over the whole
+    // reconcile: releaseStaleLock cleared only a dead holder's lock, so from here a peer
+    // process (a rolling-restart overlap) could otherwise slip into transact() and race
+    // these fetch/reset/clean/merge mutations on the shared worktree. acquireLock sits
+    // outside the try (same invariant as the siblings): a failed acquire must never reach
+    // the finally that unlinks the lockfile. releaseStaleLock already removed any lock we'd
+    // collide with, so this fresh acquire cannot deadlock on our own prior lock.
+    await this.acquireLock();
+    try {
+      await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+        timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+      });
+      this.lastFetchAt = Date.now();
+      const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';
+      if ((await this.isDirty()) || unpushed) {
+        await this.git(['rebase', '--abort']).catch(() => {});
+        await this.git(['reset', '--hard', this.target()]);
+        await this.git(['clean', '-fd']);
+      } else {
+        await this.git(['merge', '--ff-only', this.target()]);
+      }
+      // Establishes the baseline before this process ever serves a read — a vault that
+      // already carries an executable-frontmatter note refuses to come up rather than
+      // starting compromised.
+      await this.refuseUnvalidatedFetchedNotes();
+    } finally {
+      await this.releaseLock();
     }
-    // Establishes the baseline before this process ever serves a read — a vault that
-    // already carries an executable-frontmatter note refuses to come up rather than
-    // starting compromised.
-    await this.refuseUnvalidatedFetchedNotes();
   }
 
   /**

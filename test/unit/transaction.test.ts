@@ -91,6 +91,35 @@ describe('Transactor.reconcileAtStartup', () => {
     await fx.cleanup();
   });
 
+  it('holds the on-disk write lock across its reconcile mutations, so a peer cannot race the worktree', async () => {
+    // reconcileAtStartup mutates the shared checkout (fetch/reset/clean/merge) the same way
+    // transact() does, so it must hold the same on-disk lock over those mutations — otherwise
+    // a peer process (a rolling-restart overlap) can slip into transact() between the stale-lock
+    // release and the reset/merge path and race the worktree. Seed uncommitted debris so
+    // reconcile takes the reset/clean mutation path (not just an ff-only merge), then use the
+    // onGitCall seam to observe the lockfile's presence around each mutating git call.
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    await writeFile(join(fx.serverDir, 'Junk.md'), 'crash debris\n');
+
+    const mutations = new Set(['fetch', 'reset', 'clean', 'merge']);
+    const lockPresentDuring: boolean[] = [];
+    const transactor = makeTransactor(fx, {
+      onGitCall: (args) => {
+        if (mutations.has(args[0]!)) {
+          lockPresentDuring.push(existsSync(lockPath));
+        }
+      },
+    });
+
+    await transactor.reconcileAtStartup();
+
+    // At least one worktree mutation ran, and every one of them ran while the lock was held.
+    expect(lockPresentDuring.length).toBeGreaterThan(0);
+    expect(lockPresentDuring.every((present) => present)).toBe(true);
+    // The lock is released once reconcile finishes, or every later write would deadlock.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it('treats EPERM from process.kill as a live lock holder, not a dead one', async () => {
     // EPERM means the pid exists but belongs to another user/permission domain — still
     // alive. Only ESRCH (no such process) is safe to treat as dead.

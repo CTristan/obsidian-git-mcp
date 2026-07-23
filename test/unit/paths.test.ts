@@ -50,6 +50,20 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('notes/data.git.md')).toBeUndefined();
   });
 
+  it('refuses Windows reserved device names regardless of extension', () => {
+    // On Windows, CON/PRN/AUX/NUL/COM1-9/LPT1-9 resolve to the device with any extension,
+    // so "NUL.md" silently drops the write instead of touching the vault file. Match the
+    // segment's base name case-insensitively after the same trailing-dot/space fold.
+    expect(forbiddenPathReason('NUL.md')).toBeDefined();
+    expect(forbiddenPathReason('con')).toBeDefined();
+    expect(forbiddenPathReason('COM1.txt')).toBeDefined();
+    expect(forbiddenPathReason('notes/LPT9.md')).toBeDefined();
+    // Near-misses that merely start with a device prefix, or fall outside the numeric
+    // range, stay allowed — the reservation is exact on the base name.
+    expect(forbiddenPathReason('CONSOLE.md')).toBeUndefined();
+    expect(forbiddenPathReason('COM10.md')).toBeUndefined();
+  });
+
   it('refuses Windows alternate-data-stream segments', () => {
     // On NTFS, ':' addresses an alternate data stream, so ".git:payload" still
     // resolves to ".git" on disk and would otherwise slip past the segment check.
