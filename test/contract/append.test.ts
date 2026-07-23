@@ -101,10 +101,10 @@ describe('append_to_section', () => {
   });
 
   it('refuses a non-note file instead of writing unvalidated content', async () => {
-    // append_to_section forwards nothing to MCPVault, so without an extension guard it
-    // would happily write to any committed non-note file (a .canvas, an image, a
-    // .gitattributes) — bypassing the NOTE_EXTENSIONS filter every other write path is
-    // held to, since validateNoteContent only ever runs for note files.
+    // append_to_section forwards nothing to MCPVault, so without its own markdown-only
+    // guard it would happily append to any committed non-markdown file (a .canvas, an
+    // image, a .gitattributes) — "append under a heading" isn't coherent there even
+    // though MCPVault itself would parse frontmatter on a .canvas.
     await fx.collabWrite('Inbox/diagram.canvas', '{"nodes":[]}\n', 'collab: add a canvas file');
     const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'append_to_section', {

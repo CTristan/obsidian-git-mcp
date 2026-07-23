@@ -53,6 +53,25 @@ export interface TransactorConfig {
 }
 
 /**
+ * Cap on how many refuseExecutableNote calls refuseUnvalidatedFetchedNotes runs at once
+ * during a full-vault scan. A "second brain" vault can hold thousands of notes, and each
+ * call does a readFile plus a gray-matter parse, so firing every note at once would starve
+ * libuv's threadpool the same way an uncapped manifestOf walk would (see staging.ts's
+ * DIR_CONCURRENCY) — this bounds the parallelism instead of scanning one note at a time.
+ */
+const SCAN_CONCURRENCY = 64;
+
+/**
+ * Timeout for the git commands that talk to the remote — fetch and push. runGit defaults
+ * every command to a 30s ceiling, which fits fast local plumbing but not network I/O: a
+ * fetch or push against a large "second brain" vault or a slow remote can legitimately run
+ * for minutes, and a 30s kill there fails an otherwise-healthy write and forces a needless
+ * rollback. Local plumbing (status, rev-parse, merge, rebase, commit) keeps the 30s
+ * default, because a hang there means something is genuinely wrong rather than merely slow.
+ */
+const NETWORK_GIT_TIMEOUT_MS = 300_000;
+
+/**
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
  * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
  * pre-transaction checkout, because a write that didn't reach the remote never happened.
@@ -304,8 +323,16 @@ export class Transactor {
       this.validatedThroughSha === undefined
         ? (await this.git(['ls-files', '-z'])).split('\0').filter((entry) => entry.length > 0)
         : await this.changedPathsSince(this.validatedThroughSha);
-    for (const relPath of paths) {
-      await this.cfg.refuseExecutableNote(relPath);
+    // Each note's refusal is independent of every other's, so batch them through
+    // SCAN_CONCURRENCY-sized Promise.all waves (staging.ts's manifestOf shape) instead of
+    // awaiting one at a time — a wave still rejects (and aborts the scan) the moment any
+    // note in it throws, matching the serial loop's fail-fast semantics.
+    for (let i = 0; i < paths.length; i += SCAN_CONCURRENCY) {
+      await Promise.all(
+        paths.slice(i, i + SCAN_CONCURRENCY).map((relPath) =>
+          this.cfg.refuseExecutableNote(relPath),
+        ),
+      );
     }
     this.validatedThroughSha = head;
   }
@@ -319,7 +346,9 @@ export class Transactor {
     // A crashed process can't release its lock, and the lock lives in .git/ where tree
     // recovery never looks — but only a DEAD holder's lock is safe to clear.
     await this.releaseStaleLock();
-    await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+    await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+      timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+    });
     this.lastFetchAt = Date.now();
     const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';
     if ((await this.isDirty()) || unpushed) {
@@ -347,7 +376,9 @@ export class Transactor {
         // failing them (writes stay strict — their own fetch is unguarded). The
         // timestamp advances even on failure so an outage doesn't stall every read
         // behind a fetch timeout.
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch]).catch(() => {});
+        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+        }).catch(() => {});
         this.lastFetchAt = Date.now();
         if (!(await this.isDirty())) {
           // A diverged checkout can't fast-forward; reads then serve the last consistent
@@ -382,7 +413,9 @@ export class Transactor {
             'the checkout is dirty; refusing to write (restart the server to reconcile)',
           );
         }
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+        });
         this.lastFetchAt = Date.now();
         await this.git(['merge', '--ff-only', this.target()]);
         // Same guard reconcileAtStartup and readTransaction run before serving anything
@@ -474,14 +507,18 @@ export class Transactor {
     for (let attempt = 0; ; attempt++) {
       await this.cfg.beforePush?.();
       try {
-        await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`]);
+        await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`], {
+          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+        });
         return await this.git(['rev-parse', 'HEAD']);
       } catch (err) {
         // A failed push may still have landed: the remote can update the ref and
         // the ACK get lost afterwards, so check reachability before treating this
         // as a failure — otherwise we'd roll back and report "nothing was changed"
         // for a write that IS on the remote, and the caller's retry would duplicate it.
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch]);
+        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+        });
         this.lastFetchAt = Date.now();
         const landed = await this.git([
           'merge-base',

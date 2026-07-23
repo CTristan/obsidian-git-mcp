@@ -26,17 +26,34 @@ import { refuseExecutableFrontmatter, validateNoteContent, ValidationError } fro
 
 const VERSION = '0.1.0';
 
-// Every extension MCPVault's own PathFilter treats as a writable note (see its
-// allowedExtensions), so a file this wrapper must validate matches exactly what MCPVault
-// will actually let through — not just the shorter/common one.
-const NOTE_EXTENSIONS = ['.md', '.markdown'];
+// Must mirror MCPVault's own PathFilter.allowedExtensions exactly (currently
+// ['.md', '.markdown', '.txt', '.base', '.canvas']) — MCPVault's FrontmatterHandler runs
+// gray-matter on every one of these on every read, and gray-matter's default js/javascript
+// engines execute frontmatter code unless refuseExecutableFrontmatter runs first. f-006
+// adds a drift test asserting this stays in sync with MCPVault's runtime allowedExtensions.
+export const FRONTMATTER_PARSED_EXTENSIONS = ['.md', '.markdown', '.txt', '.base', '.canvas'];
 
-function isNoteFile(path: string): boolean {
+// The security-gate predicate: every extension MCPVault will hand to gray-matter, so every
+// one of them must clear validateChangedFile/refuseExecutableNote below. Use this at both
+// security sites, not isMarkdownNote — narrowing to markdown there would leave .txt/.base/
+// .canvas notes unscanned for the ---js RCE and forwarded to MCPVault unchecked.
+function isFrontmatterParsedFile(path: string): boolean {
   // MCPVault's own PathFilter lowercases before matching allowedExtensions, so this
-  // check must too, or a mixed-case note (e.g. Note.MD) skips validateNoteContent
-  // while MCPVault still writes it.
+  // check must too, or a mixed-case note (e.g. Note.MD) skips validation while MCPVault
+  // still parses it.
   const lower = path.toLowerCase();
-  return NOTE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  return FRONTMATTER_PARSED_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+// Narrower than isFrontmatterParsedFile: only the extensions append_to_section's
+// heading-targeted rewrite is meaningful for. Appending "under a heading" to a .canvas
+// (JSON) or .base (YAML) file isn't a coherent operation, so this tool stays markdown-only
+// regardless of what MCPVault will parse frontmatter on.
+const MARKDOWN_NOTE_EXTENSIONS = ['.md', '.markdown'];
+
+function isMarkdownNote(path: string): boolean {
+  const lower = path.toLowerCase();
+  return MARKDOWN_NOTE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 // MCPVault's 15 tools, classified by effect. Anything unknown is refused, because a
@@ -250,6 +267,32 @@ function containmentReason(realRoot: string, resolved: string): string | undefin
     : 'refusing to follow a symlink outside the vault';
 }
 
+// Resolves every write-path arg to where it would actually land on disk and refuses one
+// that escapes `root` or hits a restricted segment. We run it against the staged clone
+// before the delegated write and against the live vault after it, so the two callers must
+// stay identical — a shared helper is the only way they can't drift. `root`/`realRoot`
+// parameterize which tree is being judged (the clone vs. the live vault); `swapContext`
+// tails the message so the post-write caller can name the race without duplicating the loop.
+async function assertWriteDestinationsContained(
+  args: Record<string, unknown>,
+  swapContext: string,
+  root: string,
+  realRoot: string,
+): Promise<void> {
+  for (const key of WRITE_PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value !== 'string') continue;
+    const destination = await resolveSymlinkDestination(root, value);
+    if (destination === undefined) {
+      throw new InnerToolError(`${value}: symlink chain is too deep or cyclic${swapContext}`);
+    }
+    const reason = containmentReason(realRoot, destination);
+    if (reason) {
+      throw new InnerToolError(`${value}: ${reason}${swapContext}`);
+    }
+  }
+}
+
 export async function createVaultServer(config: VaultServerConfig): Promise<VaultServer> {
   const vaultPath = resolve(config.vaultPath);
   const branch = config.branch ?? 'main';
@@ -280,7 +323,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (reason) {
         throw new ValidationError(`${relPath}: ${reason}`);
       }
-      if (isNoteFile(relPath)) {
+      if (isFrontmatterParsedFile(relPath)) {
         let content: string;
         try {
           content = await readFile(resolve(vaultPath, relPath), 'utf8');
@@ -292,7 +335,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       }
     },
     refuseExecutableNote: async (relPath) => {
-      if (!isNoteFile(relPath)) return;
+      if (!isFrontmatterParsedFile(relPath)) return;
       let content: string;
       try {
         content = await readFile(resolve(vaultPath, relPath), 'utf8');
@@ -318,32 +361,6 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     args: Record<string, unknown>,
   ): Promise<CallToolResult> =>
     (await innerClient.callTool({ name, arguments: args })) as CallToolResult;
-
-  // Resolves every write-path arg to where it would actually land on disk and refuses one
-  // that escapes `root` or hits a restricted segment. We run it against the staged clone
-  // before the delegated write and against the live vault after it, so the two callers must
-  // stay identical — a shared helper is the only way they can't drift. `root`/`realRoot`
-  // parameterize which tree is being judged (the clone vs. the live vault); `swapContext`
-  // tails the message so the post-write caller can name the race without duplicating the loop.
-  const assertWriteDestinationsContained = async (
-    args: Record<string, unknown>,
-    swapContext: string,
-    root: string,
-    realRoot: string,
-  ): Promise<void> => {
-    for (const key of WRITE_PATH_ARG_KEYS) {
-      const value = args[key];
-      if (typeof value !== 'string') continue;
-      const destination = await resolveSymlinkDestination(root, value);
-      if (destination === undefined) {
-        throw new InnerToolError(`${value}: symlink chain is too deep or cyclic${swapContext}`);
-      }
-      const reason = containmentReason(realRoot, destination);
-      if (reason) {
-        throw new InnerToolError(`${value}: ${reason}${swapContext}`);
-      }
-    }
-  };
 
   // Same realpath-nearest-ancestor resolution as assertWriteDestinationsContained above,
   // run against READ_TOOLS' path args before forwarding to MCPVault. MCPVault's own
@@ -495,14 +512,13 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     if (reason) {
       return errorResult(`${path}: ${reason}`);
     }
-    // Constrain appends to note files, because this tool writes the filesystem directly
-    // instead of forwarding to MCPVault — so nothing else applies MCPVault's own
-    // NOTE_EXTENSIONS filter, and validateNoteContent only runs for note files. Without
-    // this an append would write unvalidated content to any non-note file (a .canvas, an
-    // image, .gitattributes).
-    if (!isNoteFile(path)) {
+    // Constrain appends to markdown notes: this tool writes the filesystem directly
+    // instead of forwarding to MCPVault, and "append under a heading" isn't a coherent
+    // operation on a .canvas (JSON) or .base (YAML) file even though MCPVault would parse
+    // frontmatter on either.
+    if (!isMarkdownNote(path)) {
       return errorResult(
-        `${path}: append_to_section only writes note files (${NOTE_EXTENSIONS.join(', ')})`,
+        `${path}: append_to_section only writes note files (${MARKDOWN_NOTE_EXTENSIONS.join(', ')})`,
       );
     }
     const absPath = resolve(vaultPath, path);

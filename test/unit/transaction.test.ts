@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
+import * as gitModule from '../../src/git.js';
 import {
   HiddenIgnoredWriteError,
   LockError,
@@ -12,6 +13,7 @@ import {
 } from '../../src/transaction.js';
 
 vi.mock('node:fs/promises', { spy: true });
+vi.mock('../../src/git.js', { spy: true });
 
 // Every Transactor test builds the same config; centralize the defaults (Test Agent
 // author, obsidian-git-mcp service, zero throttle, no retries, no-op validation) so a
@@ -113,6 +115,51 @@ describe('Transactor.reconcileAtStartup', () => {
     } finally {
       killSpy.mockRestore();
     }
+  });
+});
+
+describe('Transactor startup note scan', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('still rejects the whole scan when a note in a later concurrency wave fails refuseExecutableNote', async () => {
+    // Regression guard for the wave-batched rewrite: the scan runs SCAN_CONCURRENCY (64)
+    // notes at a time, so this seeds more tracked files than that and fails the
+    // alphabetically-last one — guaranteeing it lands in a later wave than the first —
+    // to prove a later wave's rejection still propagates instead of being swallowed by
+    // an earlier wave's success.
+    const total = 70;
+    for (let i = 0; i < total; i++) {
+      await writeFile(join(fx.serverDir, `Zulu-${String(i).padStart(3, '0')}.md`), `# ${i}\n`);
+    }
+    await git(['add', '-A'], fx.serverDir);
+    await git(['commit', '-m', 'bulk notes'], fx.serverDir);
+    await git(['push', 'origin', 'HEAD:main'], fx.serverDir);
+
+    const failingPath = `Zulu-${String(total - 1).padStart(3, '0')}.md`;
+    const seen: string[] = [];
+    const transactor = makeTransactor(fx, {
+      refuseExecutableNote: async (relPath) => {
+        seen.push(relPath);
+        if (relPath === failingPath) {
+          throw new Error(`refusing ${failingPath}`);
+        }
+      },
+    });
+
+    const err: unknown = await transactor.reconcileAtStartup().catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe(`refusing ${failingPath}`);
+    // The failing note sorts last, so its wave only runs once every earlier wave has
+    // already completed — confirming the scan didn't stop at the first wave.
+    expect(seen.length).toBeGreaterThan(64);
   });
 });
 
@@ -223,6 +270,50 @@ describe('Transactor ignored-file change signal', () => {
     expect((err as Error).message).toBe('refusing private/notes.md by name');
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
     expect(existsSync(ignoredPath)).toBe(false);
+  });
+});
+
+describe('Transactor network-operation timeouts', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('gives network git operations (fetch/push) a longer timeout than the 30s local default', async () => {
+    // runGit hard-caps every command at 30s unless a timeoutMs override is passed. That
+    // ceiling is right for fast local plumbing but wrong for fetch/push against a large
+    // vault or a slow remote, which can legitimately run for minutes — a 30s kill there
+    // fails a healthy write and rolls it back. Assert the network call sites raise the
+    // ceiling while local plumbing keeps the default.
+    const runGitSpy = vi.mocked(gitModule.runGit);
+    runGitSpy.mockClear();
+    const transactor = makeTransactor(fx);
+
+    await transactor.transact('a tracked write', async () => {
+      await writeFile(join(fx.serverDir, 'Inbox', 'Beta.md'), '# Beta\n\nupdated\n');
+    });
+
+    const networkCalls = runGitSpy.mock.calls.filter(
+      ([args]) => args[0] === 'fetch' || args[0] === 'push',
+    );
+    const localCalls = runGitSpy.mock.calls.filter(([args]) =>
+      ['rev-parse', 'merge', 'add'].includes(args[0]!),
+    );
+    // Both kinds actually ran, so neither loop below is vacuously true.
+    expect(networkCalls.some(([args]) => args[0] === 'fetch')).toBe(true);
+    expect(networkCalls.some(([args]) => args[0] === 'push')).toBe(true);
+    expect(localCalls.length).toBeGreaterThan(0);
+    for (const [, , options] of networkCalls) {
+      expect(options?.timeoutMs).toBeGreaterThan(30_000);
+    }
+    for (const [, , options] of localCalls) {
+      expect(options?.timeoutMs).toBeUndefined();
+    }
   });
 });
 

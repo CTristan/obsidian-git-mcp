@@ -15,6 +15,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { forbiddenPathReason } from './paths.js';
 
 /**
  * One file or symlink recorded by manifestOf. mtime is nanosecond-precise (bigint) on
@@ -392,10 +393,14 @@ async function removeEmptyParentDirs(
 
 /**
  * Reconcile the real vault against a delegated write that ran in the clone: copy every
- * changed/added file back through fd-pinned writes, and remove every deleted one. A
- * changed/added entry that is a symlink is refused outright — MCPVault never creates or
- * rewrites symlinks, so one appearing in the diff is tampering, not a legitimate write
- * (an unchanged in-vault symlink the write merely resolved *through* never enters the
+ * changed/added file back through fd-pinned writes, and remove every deleted one. Every
+ * manifest path is re-checked against forbiddenPathReason before either happens — cloneWorktree
+ * skips `.git`/`.obsidian` at the clone's top level, so a restricted-segment entry should never
+ * exist to diff, but that's a single upstream invariant, and the doctrine this codebase already
+ * applies to every other write path (paths.ts) is that one layer trusting itself is how a vault
+ * gets lost. A changed/added entry that is a symlink is also refused outright — MCPVault never
+ * creates or rewrites symlinks, so one appearing in the diff is tampering, not a legitimate
+ * write (an unchanged in-vault symlink the write merely resolved *through* never enters the
  * diff, so it stays untouched). After the deletes, best-effort cleanup removes any directory
  * they emptied so the live tree doesn't drift from the clone. This and appendTool (server.ts)
  * are the only two paths that mutate the real vault, and both do so exclusively through
@@ -410,6 +415,10 @@ export async function applyCloneDiff(
 ): Promise<void> {
   for (const [rel, entry] of after) {
     if (isUnchanged(before.get(rel), entry)) continue;
+    const forbidden = forbiddenPathReason(rel);
+    if (forbidden !== undefined) {
+      throw new Error(`${rel}: refusing to write — ${forbidden}`);
+    }
     if (entry.isSymlink) {
       throw new Error(`${rel}: refusing to copy a symlink created during the write`);
     }
@@ -418,6 +427,10 @@ export async function applyCloneDiff(
   const deleted: string[] = [];
   for (const rel of before.keys()) {
     if (after.has(rel)) continue;
+    const forbidden = forbiddenPathReason(rel);
+    if (forbidden !== undefined) {
+      throw new Error(`${rel}: refusing to delete — ${forbidden}`);
+    }
     try {
       await unlinkNoFollow(vaultPath, realVaultPath, rel);
     } catch (err) {

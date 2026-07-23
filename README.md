@@ -18,7 +18,7 @@ My vault's `main` branch on GitHub is the canonical copy of my second brain, and
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — `corepack enable pnpm` — or use pnpm's own installer at <https://pnpm.io/installation>:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git
@@ -62,7 +62,7 @@ claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian
 
 ## Status: the spike's verdict
 
-MCPVault stays. The contract suite (71 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
+MCPVault stays. The contract suite (72 tests across reads, attributed writes, targeted patches, validation rollback, conflict safety, security, locking, and crash recovery) passes with MCPVault as the in-process tool surface, wired as a black-box protocol proxy over an `InMemoryTransport` pair. The wrapper owns everything git: transactions, attribution, locking, and startup crash recovery. We evaluated forking the existing git-flavored vault MCP servers instead and rejected each one, because their git models (remote-always-wins cache resets, debounced batch pushes) are the opposite of per-write transactions.
 
 Two quirks worth knowing, neither disqualifying:
 

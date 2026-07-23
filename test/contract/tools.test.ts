@@ -103,8 +103,11 @@ describe('wrapper-added tools', () => {
     await callTool(srv.client, 'write_note', { path: 'Inbox/B.md', content: '# B\n' });
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 2.7 });
     expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
-    // 2.7 floors to 2, so exactly the two newest commits are returned.
-    expect(textOf(res).trim().split('\n')).toHaveLength(2);
+    // 2.7 floors to 2, so exactly the two newest commits are returned, newest first.
+    const changes = textOf(res).trim().split('\n');
+    expect(changes).toHaveLength(2);
+    expect(changes[0]).toContain('Inbox/B.md');
+    expect(changes[1]).toContain('Inbox/A.md');
   });
 
   it('list_recent_changes clamps an explicit limit of 0 to the documented minimum of 1', async () => {

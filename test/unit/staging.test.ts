@@ -99,6 +99,39 @@ describe('applyCloneDiff symlink safety', () => {
     expect(existsSync(join(vaultPath, 'Link.md'))).toBe(false);
   });
 
+  it('refuses to copy an added entry whose manifest path runs under .git', async () => {
+    // cloneWorktree never copies .git into the clone, so this path can only reach the diff
+    // if a delegated write escaped its argument-validated target and created one anyway.
+    // The copy-back boundary must refuse it independently of that upstream invariant,
+    // exactly like the append path already does via forbiddenPathReason.
+    await mkdir(join(cloneDir, '.git', 'hooks'), { recursive: true });
+    await writeFile(join(cloneDir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nevil\n');
+
+    const before: Manifest = new Map();
+    const after: Manifest = new Map([
+      ['.git/hooks/pre-commit', { size: 15n, mtimeNs: 1n, ino: 1n, isSymlink: false }],
+    ]);
+
+    await expect(
+      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
+    ).rejects.toThrow(/not allowed/);
+    expect(existsSync(join(vaultPath, '.git', 'hooks', 'pre-commit'))).toBe(false);
+  });
+
+  it('refuses to delete a manifest entry whose path runs under .obsidian', async () => {
+    // A restricted-segment path has no business appearing in `before` either, but the
+    // delete side gets the same independent refusal as the write side rather than trusting
+    // that only legitimate entries ever end up there.
+    const before: Manifest = new Map([
+      ['.obsidian/app.json', { size: 2n, mtimeNs: 1n, ino: 1n, isSymlink: false }],
+    ]);
+    const after: Manifest = new Map();
+
+    await expect(
+      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
+    ).rejects.toThrow(/not allowed/);
+  });
+
   it('deletes a legitimate pre-existing symlink entry without touching its target', async () => {
     // manifestOf records any pre-existing vault symlink with isSymlink: true. Removing one
     // in the clone must actually delete the in-vault link, not refuse it as if it were an
