@@ -130,4 +130,25 @@ describe('append_to_section', () => {
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
     expect(await fx.bareHead()).toBe(preRemote);
   });
+
+  it('refuses to create a section when the note ends inside an unclosed fence', async () => {
+    // Creating the missing "Log" heading here would splice it into the still-open code
+    // block and silently corrupt the note, so the tool surfaces isError and leaves the
+    // checkout and remote untouched.
+    await fx.collabWrite(
+      'Inbox/Unclosed.md',
+      '# T\n\n## Notes\n\n```\ncode line\n',
+      'collab: add unclosed fence note',
+    );
+    const preRemote = await fx.bareHead();
+    const res = await callTool(srv.client, 'append_to_section', {
+      path: 'Inbox/Unclosed.md',
+      heading: 'Log',
+      text: '- added',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('unclosed code fence');
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    expect(await fx.bareHead()).toBe(preRemote);
+  });
 });

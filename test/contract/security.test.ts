@@ -42,6 +42,16 @@ async function commitSymlinkChain(
   await git(['push', 'origin', 'main'], fx.collabDir);
 }
 
+/** Seeds an RCE-probe flag on globalThis; a leaked ---js payload would flip it to true. */
+function setRceProbe(key: string, value: boolean): void {
+  (globalThis as Record<string, unknown>)[key] = value;
+}
+
+/** Reads an RCE-probe flag back off globalThis to assert the payload never executed. */
+function getRceProbe(key: string): unknown {
+  return (globalThis as Record<string, unknown>)[key];
+}
+
 describe('security', () => {
   let fx: Fixture;
   let srv: TestServer;
@@ -323,7 +333,7 @@ describe('security', () => {
     // pushed by a collaborator (never touched by this wrapper's write-path validation)
     // lands via readTransaction's own fetch/fast-forward and must be refused before
     // read_note ever hands it to MCPVault.
-    (globalThis as Record<string, unknown>)['__ogmRceProbeTargeted'] = false;
+    setRceProbe('__ogmRceProbeTargeted', false);
     const payload = [
       '---js',
       'module.exports = { t: ((globalThis.__ogmRceProbeTargeted = true), "x") }',
@@ -334,14 +344,14 @@ describe('security', () => {
 
     const res = await callTool(srv.client, 'read_note', { path: 'Malicious.md' });
     expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeTargeted']).toBe(false);
+    expect(getRceProbe('__ogmRceProbeTargeted')).toBe(false);
   });
 
   it('list_all_tags refuses wholesale when a fetched note anywhere in the vault carries executable frontmatter', async () => {
     // list_all_tags takes no target path — it scans every note in the vault, so the
     // targeted read_note-shaped guard alone can't cover it. The RCE note doesn't need to
     // be the one asked for; it only needs to be reachable from HEAD.
-    (globalThis as Record<string, unknown>)['__ogmRceProbeUntargeted'] = false;
+    setRceProbe('__ogmRceProbeUntargeted', false);
     const payload = [
       '---js',
       'module.exports = { t: ((globalThis.__ogmRceProbeUntargeted = true), "x") }',
@@ -352,7 +362,7 @@ describe('security', () => {
 
     const res = await callTool(srv.client, 'list_all_tags', {});
     expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeUntargeted']).toBe(false);
+    expect(getRceProbe('__ogmRceProbeUntargeted')).toBe(false);
   });
 
   it('patch_note refuses a note that arrived via fetch with executable ---js frontmatter, never running it', async () => {
@@ -360,7 +370,7 @@ describe('security', () => {
     // no prior read_note call required. patch_note's readNote() would otherwise hand the
     // payload straight to gray-matter's default (unsafe) engines the moment the write tool
     // tries to load the note it's about to patch.
-    (globalThis as Record<string, unknown>)['__ogmRceProbeWrite'] = false;
+    setRceProbe('__ogmRceProbeWrite', false);
     const payload = [
       '---js',
       'module.exports = { t: ((globalThis.__ogmRceProbeWrite = true), "x") }',
@@ -376,7 +386,7 @@ describe('security', () => {
       newString: 'pwned',
     });
     expect(res.isError).toBe(true);
-    expect((globalThis as Record<string, unknown>)['__ogmRceProbeWrite']).toBe(false);
+    expect(getRceProbe('__ogmRceProbeWrite')).toBe(false);
     await expectRemoteUnchanged(fx, preRemote);
   });
 
@@ -390,7 +400,7 @@ describe('security', () => {
     async (ext) => {
       const file = `Malicious.${ext}`;
       const probeKey = `__ogmRceProbe${ext.charAt(0).toUpperCase()}${ext.slice(1)}Read`;
-      (globalThis as Record<string, unknown>)[probeKey] = false;
+      setRceProbe(probeKey, false);
       const payload = [
         '---js',
         `module.exports = { t: ((globalThis.${probeKey} = true), "x") }`,
@@ -401,7 +411,7 @@ describe('security', () => {
 
       const res = await callTool(srv.client, 'read_note', { path: file });
       expect(res.isError).toBe(true);
-      expect((globalThis as Record<string, unknown>)[probeKey]).toBe(false);
+      expect(getRceProbe(probeKey)).toBe(false);
     },
   );
 
@@ -410,7 +420,7 @@ describe('security', () => {
     async (ext) => {
       const file = `MaliciousW.${ext}`;
       const probeKey = `__ogmRceProbe${ext.charAt(0).toUpperCase()}${ext.slice(1)}Write`;
-      (globalThis as Record<string, unknown>)[probeKey] = false;
+      setRceProbe(probeKey, false);
       const payload = [
         '---js',
         `module.exports = { t: ((globalThis.${probeKey} = true), "x") }`,
@@ -426,7 +436,7 @@ describe('security', () => {
         newString: 'pwned',
       });
       expect(res.isError).toBe(true);
-      expect((globalThis as Record<string, unknown>)[probeKey]).toBe(false);
+      expect(getRceProbe(probeKey)).toBe(false);
       await expectRemoteUnchanged(fx, preRemote);
     },
   );

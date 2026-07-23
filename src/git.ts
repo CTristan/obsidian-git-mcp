@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -34,11 +37,17 @@ export interface GitOptions {
 }
 
 // Server-side git must never execute host-configured hook code: a global or system
-// core.hooksPath would make every fetch/push/commit run arbitrary hooks off the host. A
-// command-line -c outranks every config layer, and /dev/null is never a directory, so no
-// hook path resolved beneath it can ever exist. We can't wipe global/system config wholesale
-// instead — that would drop the user's credential.helper and break authenticated pushes.
-const DISABLE_HOOKS = ['-c', 'core.hooksPath=/dev/null'];
+// core.hooksPath makes every fetch/push/commit run arbitrary host hooks. A command-line -c
+// outranks every config layer, so we redirect core.hooksPath to an empty directory we create
+// and own. Git resolves a hook by probing <hooksPath>/<hookname>, finds nothing in an empty
+// dir, and runs no hook — and that holds identically on Windows, macOS, and Linux, which
+// /dev/null does not: Git for Windows can read /dev/null as a literal relative path and even
+// create a dev/null directory rather than treating it as the null device. We forward-slash the
+// path because git parses a -c value like a config-file value, where a Windows temp path's
+// backslashes would read as escape sequences. Wiping global/system config wholesale isn't an
+// option — that would drop the user's credential.helper and break authenticated pushes.
+const EMPTY_HOOKS_DIR = mkdtempSync(join(tmpdir(), 'ogm-nohooks-')).replaceAll('\\', '/');
+const DISABLE_HOOKS = ['-c', `core.hooksPath=${EMPTY_HOOKS_DIR}`];
 
 /**
  * Run a git command via execFile with an argument array — never a shell string — so
