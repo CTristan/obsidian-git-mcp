@@ -62,13 +62,15 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
   // mkdtemp has no mode option, so tighten to 0700 before copying anything in — the clone
   // holds real vault content and must not be world-readable while it's populated.
   const dir = await mkdtemp(join(tmpdir(), 'ogm-stage-'));
-  await chmod(dir, 0o700);
   const opts = {
     recursive: true,
     verbatimSymlinks: true,
     mode: constants.COPYFILE_FICLONE,
   } as const;
   try {
+    // Inside the try so a chmod failure hits the same cleanup as a copy failure — otherwise
+    // it would orphan the mkdtemp dir the caller never gets a chance to remove.
+    await chmod(dir, 0o700);
     for (const entry of await readdir(vaultPath)) {
       if (entry === '.git' || entry === '.obsidian') continue;
       await cp(join(vaultPath, entry), join(dir, entry), opts);

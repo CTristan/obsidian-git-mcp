@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createFixture, git, SEED_NOTES, type Fixture } from '../fixture.js';
-import { callTool, commitShaOf, startServer, textOf, type TestServer } from '../helpers.js';
+import { createFixture, SEED_NOTES, type Fixture } from '../fixture.js';
+import {
+  callTool,
+  commitShaOf,
+  expectCleanCheckout,
+  startServer,
+  textOf,
+  type TestServer,
+} from '../helpers.js';
 
 const ALPHA = 'Projects/Alpha.md';
 
@@ -96,11 +103,7 @@ describe('append_to_section', () => {
       text: '',
     });
     expect(emptyText.isError).toBe(true);
-    // A refused write must leave no unpushed local commit. We compare against origin/main
-    // rather than a pre-call HEAD snapshot because the transaction fast-forwards HEAD to the
-    // remote before it can reject, so a snapshot would differ for a reason unrelated to the bug.
-    expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 
@@ -119,8 +122,7 @@ describe('append_to_section', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('note');
     expect(textOf(res)).toContain('.md');
-    expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 
@@ -132,8 +134,7 @@ describe('append_to_section', () => {
       text: 'y',
     });
     expect(res.isError).toBe(true);
-    expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 
@@ -154,8 +155,7 @@ describe('append_to_section', () => {
     });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toContain('unclosed code fence');
-    expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 });

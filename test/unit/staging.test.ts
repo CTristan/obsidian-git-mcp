@@ -262,6 +262,20 @@ describe('cloneWorktree failure cleanup', () => {
       expect(leftovers).toEqual([]);
     },
   );
+
+  it('removes its mkdtemp dir when the 0700 chmod fails', async () => {
+    // The chmod that tightens the fresh mkdtemp dir has to sit inside the cleanup try: if it
+    // throws, the dir it just created is orphaned, because the sole caller only binds `stage`
+    // (and its finally-rm) on a successful return. Force the chmod to fail and the dir must
+    // still be gone.
+    await writeFile(join(vaultPath, 'readable.md'), '# ok\n');
+    vi.mocked(chmod).mockImplementationOnce(() => Promise.reject(new Error('chmod boom')));
+
+    await expect(cloneWorktree(vaultPath)).rejects.toThrow(/chmod boom/);
+
+    const leftovers = (await readdir(tmpRoot)).filter((n) => n.startsWith('ogm-stage-'));
+    expect(leftovers).toEqual([]);
+  });
 });
 
 describe('manifestOf nested tree', () => {

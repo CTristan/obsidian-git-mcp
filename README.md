@@ -20,12 +20,12 @@ The full build-vs-wrap evaluation — why the server wraps MCPVault instead of f
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH` — 2.9 because the transaction wrapper suppresses host git hooks with `core.hooksPath`, a config key git added in 2.9. (Contributing to the repo needs a higher git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation — see [CONTRIBUTING.md](CONTRIBUTING.md).) pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH` — 2.9 because the transaction wrapper suppresses host git hooks with `core.hooksPath`, a config key git added in 2.9. (Contributing to the repo needs a higher git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation — see [CONTRIBUTING.md](CONTRIBUTING.md).) pnpm isn't bundled with Node, so enable it via Corepack. Node ≤ 24 ships Corepack, so run `corepack enable pnpm` directly — reach for `npm install --global corepack@latest` first only if that bundled Corepack is too stale to enable current pnpm releases, because on a version that already bundles Corepack the global install can clash with the existing shims. Node 25+ dropped bundled Corepack, so there you install it first with `npm install --global corepack@latest` and then `corepack enable pnpm`. Or skip Corepack entirely and use pnpm's own installer at <https://pnpm.io/installation>:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git
 cd obsidian-git-mcp
-pnpm install && pnpm build
+pnpm install --frozen-lockfile && pnpm build
 ```
 
 The build does not put `obsidian-git-mcp` on `PATH`. Run `pnpm link --global` from the repo to get the bare command, or use `node /path/to/obsidian-git-mcp/dist/cli.js` directly — the examples below show the direct form because it works without any extra step.

@@ -1,45 +1,21 @@
 import { existsSync } from 'node:fs';
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createFixture, git, type Fixture } from '../fixture.js';
-import { callTool, startServer, textOf, type TestServer } from '../helpers.js';
+import { createFixture, type Fixture } from '../fixture.js';
+import {
+  callTool,
+  commitSymlink,
+  commitSymlinkChain,
+  expectCleanCheckout,
+  startServer,
+  textOf,
+  type TestServer,
+} from '../helpers.js';
 
 /** The rejected write never reached the remote — its head is exactly where it was. */
 async function expectRemoteUnchanged(fx: Fixture, preRemote: string): Promise<void> {
   expect(await fx.bareHead()).toBe(preRemote);
-}
-
-/** The rejected write left no trace in the checkout — nothing staged, nothing dirty. */
-async function expectCleanWorkingTree(fx: Fixture): Promise<void> {
-  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-}
-
-/** Commits a symlink from the collaborator clone and pushes it to the remote. */
-async function commitSymlink(
-  fx: Fixture,
-  linkName: string,
-  target: string,
-  message: string,
-): Promise<void> {
-  await symlink(target, join(fx.collabDir, linkName));
-  await git(['add', '-A'], fx.collabDir);
-  await git(['commit', '-m', message], fx.collabDir);
-  await git(['push', 'origin', 'main'], fx.collabDir);
-}
-
-/** Commits a chain of symlinks (each hop's target becomes the next hop's name) in one push. */
-async function commitSymlinkChain(
-  fx: Fixture,
-  links: ReadonlyArray<readonly [linkName: string, target: string]>,
-  message: string,
-): Promise<void> {
-  for (const [linkName, target] of links) {
-    await symlink(target, join(fx.collabDir, linkName));
-  }
-  await git(['add', '-A'], fx.collabDir);
-  await git(['commit', '-m', message], fx.collabDir);
-  await git(['push', 'origin', 'main'], fx.collabDir);
 }
 
 /** Seeds an RCE-probe flag on globalThis; a leaked ---js payload would flip it to true. */
@@ -82,6 +58,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.root, 'evil.md'))).toBe(false);
     await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanCheckout(fx);
   });
 
   it('absolute paths are refused for reads and writes', async () => {
@@ -103,7 +80,7 @@ describe('security', () => {
     });
     expect(driveForm.isError).toBe(true);
     await expectRemoteUnchanged(fx, preRemote);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('.obsidian writes are refused at the tool layer', async () => {
@@ -116,7 +93,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     await expectRemoteUnchanged(fx, preRemote);
     expect(await readFile(join(fx.serverDir, '.obsidian', 'app.json'), 'utf8')).toBe(before);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('.obsidian is refused by wrapper-added tools too', async () => {
@@ -129,7 +106,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     await expectRemoteUnchanged(fx, preRemote);
     expect(existsSync(join(fx.serverDir, '.obsidian', 'note.md'))).toBe(false);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('append_to_section refuses a symlink that escapes the vault', async () => {
@@ -147,7 +124,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).not.toContain('injected');
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('write_note is refused when a committed symlink resolves into .git', async () => {
@@ -164,7 +141,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(existsSync(join(fx.serverDir, '.git', 'hooks', 'pre-commit'))).toBe(false);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('write_note is refused when a committed symlink resolves entirely outside the vault', async () => {
@@ -188,7 +165,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).toBe(before);
     await expectRemoteUnchanged(fx, preRemote);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('patch_note is refused when a committed symlink resolves entirely outside the vault', async () => {
@@ -209,7 +186,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(await readFile(target, 'utf8')).toBe(before);
     await expectRemoteUnchanged(fx, preRemote);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('write_note is refused when a 2-hop symlink chain resolves outside the vault', async () => {
@@ -236,7 +213,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(existsSync(externalTarget)).toBe(false);
     await expectRemoteUnchanged(fx, preRemote);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('write_note is refused when a 2-hop symlink chain resolves into .git', async () => {
@@ -261,7 +238,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(await readFile(join(fx.serverDir, '.git', 'config'), 'utf8')).toBe(before);
     await expectRemoteUnchanged(fx, preRemote);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('append_to_section is refused when a committed symlink resolves into .git', async () => {
@@ -278,7 +255,7 @@ describe('security', () => {
     });
     expect(res.isError).toBe(true);
     expect(await readFile(join(fx.serverDir, '.git', 'config'), 'utf8')).toBe(before);
-    await expectCleanWorkingTree(fx);
+    await expectCleanCheckout(fx);
   });
 
   it('append_to_section through an in-vault symlink to an in-vault note still resolves it', async () => {
@@ -388,6 +365,7 @@ describe('security', () => {
     expect(res.isError).toBe(true);
     expect(getRceProbe('__ogmRceProbeWrite')).toBe(false);
     await expectRemoteUnchanged(fx, preRemote);
+    await expectCleanCheckout(fx);
   });
 
   // MCPVault's PathFilter.allowedExtensions covers .txt/.base/.canvas exactly like .md,
@@ -438,6 +416,7 @@ describe('security', () => {
       expect(res.isError).toBe(true);
       expect(getRceProbe(probeKey)).toBe(false);
       await expectRemoteUnchanged(fx, preRemote);
+      await expectCleanCheckout(fx);
     },
   );
 

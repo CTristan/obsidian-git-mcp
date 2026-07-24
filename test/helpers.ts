@@ -1,3 +1,5 @@
+import { symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -87,4 +89,43 @@ export async function expectRolledBack(fx: Fixture, preRemote: string, preHead: 
   expect(await fx.bareHead()).toBe(preRemote);
   expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
   expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+}
+
+/**
+ * A refused write must leave no trace in the checkout: nothing staged or dirty, and no
+ * committed-but-unpushed local commit. We count unpushed commits against origin/main rather
+ * than a pre-call HEAD snapshot because the transaction fast-forwards HEAD to the remote
+ * before it can reject a write, so a snapshot HEAD would differ for a reason unrelated to
+ * the stray-commit bug this guards.
+ */
+export async function expectCleanCheckout(fx: Fixture): Promise<void> {
+  expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
+}
+
+/** Commits a symlink from the collaborator clone and pushes it to the remote. */
+export async function commitSymlink(
+  fx: Fixture,
+  linkName: string,
+  target: string,
+  message: string,
+): Promise<void> {
+  await symlink(target, join(fx.collabDir, linkName));
+  await git(['add', '-A'], fx.collabDir);
+  await git(['commit', '-m', message], fx.collabDir);
+  await git(['push', 'origin', 'main'], fx.collabDir);
+}
+
+/** Commits a chain of symlinks (each hop's target becomes the next hop's name) in one push. */
+export async function commitSymlinkChain(
+  fx: Fixture,
+  links: ReadonlyArray<readonly [linkName: string, target: string]>,
+  message: string,
+): Promise<void> {
+  for (const [linkName, target] of links) {
+    await symlink(target, join(fx.collabDir, linkName));
+  }
+  await git(['add', '-A'], fx.collabDir);
+  await git(['commit', '-m', message], fx.collabDir);
+  await git(['push', 'origin', 'main'], fx.collabDir);
 }

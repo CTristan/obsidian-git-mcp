@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,8 @@ import { createFixture, git, type Fixture } from '../fixture.js';
 import {
   callTool,
   commitShaOf,
+  commitSymlink,
+  commitSymlinkChain,
   expectRolledBack,
   SERVICE_EMAIL,
   SERVICE_NAME,
@@ -132,10 +134,7 @@ describe('destructive tools', () => {
     const target = join(fx.outsideDir, 'precious.md');
     const before = '# Precious\n\ndo not delete\n';
     await writeFile(target, before);
-    await symlink(target, join(fx.collabDir, 'Linked.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add symlink to outside target'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlink(fx, 'Linked.md', target, 'collab: add symlink to outside target');
 
     srv = await startServer(fx, { allowDestructive: true });
     const preRemote = await fx.bareHead();
@@ -156,10 +155,7 @@ describe('destructive tools', () => {
     const target = join(fx.outsideDir, 'secret.md');
     const before = '# Secret\n\nexternal content\n';
     await writeFile(target, before);
-    await symlink(target, join(fx.collabDir, 'Linked.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add symlink to outside target'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlink(fx, 'Linked.md', target, 'collab: add symlink to outside target');
 
     srv = await startServer(fx, { allowDestructive: true });
     const preRemote = await fx.bareHead();
@@ -184,11 +180,14 @@ describe('destructive tools', () => {
     // the bug, moveNote would have deleted it after "successfully" relocating its
     // content to the external target.
     const externalTarget = join(fx.outsideDir, 'exfil.md');
-    await symlink('Hop2.md', join(fx.collabDir, 'Hop1.md'));
-    await symlink(externalTarget, join(fx.collabDir, 'Hop2.md'));
-    await git(['add', '-A'], fx.collabDir);
-    await git(['commit', '-m', 'collab: add 2-hop symlink chain escaping the vault'], fx.collabDir);
-    await git(['push', 'origin', 'main'], fx.collabDir);
+    await commitSymlinkChain(
+      fx,
+      [
+        ['Hop1.md', 'Hop2.md'],
+        ['Hop2.md', externalTarget],
+      ],
+      'collab: add 2-hop symlink chain escaping the vault',
+    );
 
     srv = await startServer(fx, { allowDestructive: true });
     const preRemote = await fx.bareHead();
