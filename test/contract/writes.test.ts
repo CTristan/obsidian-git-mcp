@@ -81,7 +81,7 @@ describe('writes', () => {
     expect(commitShaOf(res)).toBe(await fx.bareHead());
 
     const remote = await fx.remoteFile('Projects/Alpha.md');
-    const seedBody = SEED_NOTES['Projects/Alpha.md']!.split('---\n')[2]!;
+    const seedBody = matter(SEED_NOTES['Projects/Alpha.md']!).content;
     expect(remote.endsWith(seedBody)).toBe(true);
     // Sibling keys survive the merge semantically — MCPVault normalizes flow-style
     // whitespace ([project] -> [ project ]), so assert the parsed data, not the bytes.
