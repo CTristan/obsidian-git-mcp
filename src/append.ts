@@ -154,10 +154,22 @@ export function appendToSection(content: string, heading: string, text: string):
     }
   }
 
-  const inserted = text.split('\n').map((l) => {
-    const bare = l.replace(/\r$/, '');
-    return useCRLF ? `${bare}\r` : bare;
+  // Inserting past the array's last element means the note had no trailing newline (a note
+  // that ends with one splits to a trailing "" element the scan lands before), so the last
+  // inserted line becomes the note's new final line with no "\n" after it.
+  const atEnd = insertAt + 1 === lines.length;
+  const bareLines = text.split('\n').map((l) => l.replace(/\r$/, ''));
+  const inserted = bareLines.map((bare, i) => {
+    // A CRLF line carries its "\r" only because the join supplies a following "\n"; the new
+    // final line of a no-trailing-newline note has none, so a "\r" there would dangle alone.
+    const isNewFinalLine = atEnd && i === bareLines.length - 1;
+    return useCRLF && !isNewFinalLine ? `${bare}\r` : bare;
   });
+  if (useCRLF && atEnd && !lines[insertAt]!.endsWith('\r')) {
+    // The displaced former-last line never got a "\r" (the note ended without a newline), but
+    // the splice pushes it before a join "\n", so restore its CRLF pair to keep endings uniform.
+    lines[insertAt] = `${lines[insertAt]!}\r`;
+  }
   lines.splice(insertAt + 1, 0, ...inserted);
   return lines.join('\n');
 }

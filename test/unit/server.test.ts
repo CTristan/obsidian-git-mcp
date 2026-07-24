@@ -1,11 +1,21 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createMcpVaultServer, PathFilter } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
-import { FRONTMATTER_PARSED_EXTENSIONS } from '../../src/server.js';
+import { FRONTMATTER_PARSED_EXTENSIONS, VERSION } from '../../src/server.js';
+
+describe('VERSION', () => {
+  it('matches the package.json version so a bump can never drift', async () => {
+    // Read package.json through an independent path from the one server.ts uses, so this
+    // stays a real drift guard: if someone re-hardcodes the literal or breaks the lookup,
+    // the next `pnpm version` bump turns this red instead of shipping a stale version string.
+    const pkg = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'));
+    expect(VERSION).toBe(pkg.version);
+  });
+});
 
 describe('FRONTMATTER_PARSED_EXTENSIONS', () => {
   it('is a superset of MCPVault PathFilter.allowedExtensions', () => {
@@ -22,6 +32,32 @@ describe('FRONTMATTER_PARSED_EXTENSIONS', () => {
     for (const ext of allowedExtensions) {
       expect(FRONTMATTER_PARSED_EXTENSIONS).toContain(ext);
     }
+  });
+});
+
+describe('gray-matter single resolution', () => {
+  it('resolves to exactly one version, matching the pin the ---js gate is written against', async () => {
+    // src/validate.ts disables gray-matter's js/javascript engines, but that only closes the
+    // RCE if MCPVault parses notes with the SAME gray-matter instance — MCPVault declares it
+    // as ^4.0.3, so without a single forced resolution a future 4.x could dedupe into a second
+    // instance whose default engines run frontmatter the wrapper's copy never sees. The
+    // pnpm.overrides pin plus this assertion are what keep that single instance from drifting:
+    // if a dependency bump pulls in a second gray-matter version, or the override is dropped,
+    // this goes red instead of silently reopening the hole.
+    const root = new URL('../../', import.meta.url);
+    const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+    const lockfile = await readFile(new URL('pnpm-lock.yaml', root), 'utf8');
+
+    const pin = pkg.dependencies['gray-matter'];
+    expect(pkg.pnpm?.overrides?.['gray-matter']).toBe(pin);
+
+    // Package/snapshot declaration keys sit at two-space indent as `gray-matter@<version>:`;
+    // nested `gray-matter: <version>` dependency references are deeper-indented and lack the
+    // `@`, so this matches only the resolved-version declarations.
+    const versions = new Set(
+      [...lockfile.matchAll(/^ {2}gray-matter@([^\s:(]+)/gm)].map((m) => m[1]),
+    );
+    expect([...versions]).toEqual([pin]);
   });
 });
 

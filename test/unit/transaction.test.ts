@@ -225,6 +225,99 @@ describe('Transactor clearDeadLock TOCTOU', () => {
       killSpy.mockRestore();
     }
   });
+
+  it('keeps a displaced live lock as reclaim debris when a third peer re-took the freed path before the link-back', async () => {
+    // Extends the refuse-on-re-acquire race by one more contender. Our rename displaces peer C's
+    // freshly-acquired live lock to claimPath and frees lockPath; a THIRD peer D then wins the
+    // just-freed lockPath before our link-back can restore C's. link(claimPath, lockPath) fails
+    // EEXIST, so claimPath is C's only surviving lock representation — unlinking it there would
+    // leave C and D both believing they hold exclusive access (the cross-process mutual-exclusion
+    // violation this module exists to prevent). A correct clear drops claimPath only when the
+    // restore succeeds; here it must leave C's bytes as named .reclaim- debris and refuse.
+    const actualFs = await vi.importActual<typeof fsPromises>('node:fs/promises');
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    const deadPid = 999999;
+    await writeFile(lockPath, `pid ${deadPid} at ${new Date().toISOString()}\n`);
+
+    const cBytes = `pid ${process.pid} at ${new Date().toISOString()} peer-C\n`;
+    const dBytes = `pid ${process.pid} at ${new Date().toISOString()} peer-D\n`;
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === deadPid) {
+        // Peer C re-acquires the moment the staleness snapshot is taken (live pid, new bytes),
+        // so after the rename claimPath no longer matches the dead bytes we inspected.
+        writeFileSync(lockPath, cBytes);
+        const err = new Error('ESRCH') as NodeJS.ErrnoException;
+        err.code = 'ESRCH';
+        throw err;
+      }
+      return true;
+    });
+
+    let claimPath: string | undefined;
+    const renameSpy = vi.mocked(fsPromises.rename);
+    renameSpy.mockImplementation((async (from: string, to: string) => {
+      await actualFs.rename(from, to);
+      if (from === lockPath) {
+        // The rename freed lockPath; peer D wins it before the link-back can restore C's lock.
+        claimPath = to;
+        writeFileSync(lockPath, dBytes);
+      }
+    }) as unknown as typeof fsPromises.rename);
+
+    try {
+      const transactor = makeTransactor(fx);
+      const err: unknown = await transactor['clearDeadLock']().catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(LockError);
+      // D holds the canonical path untouched; C's displaced lock survives as reclaim debris.
+      expect(existsSync(lockPath)).toBe(true);
+      expect(await fsPromises.readFile(lockPath, 'utf8')).toBe(dBytes);
+      expect(claimPath).toBeDefined();
+      expect(existsSync(claimPath!)).toBe(true);
+      expect(await fsPromises.readFile(claimPath!, 'utf8')).toBe(cBytes);
+    } finally {
+      killSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+  });
+
+  it('publishes the lock atomically, so a torn pid write cannot leave reclaimable partial bytes at lockPath', async () => {
+    // The replaced two-phase publish created the lockfile with open('wx') and wrote the pid on
+    // a later await, so a short/torn write could leave non-empty partial bytes (a bare "pid "
+    // prefix) at lockPath. clearDeadLock treats non-empty unparseable content as crash debris
+    // and reclaims it — deleting a LIVE holder's lock and freeing reconcile to race its
+    // transaction. Reproduce that torn write through the old open+handle seam; the atomic
+    // publish never uses it (it writes a full temp file and hard-links it in), so lockPath
+    // always carries this live process's complete pid and a peer clearDeadLock must refuse.
+    const actualFs = await vi.importActual<typeof fsPromises>('node:fs/promises');
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+
+    vi.mocked(fsPromises.open).mockImplementation((async (path: string, ...args: unknown[]) => {
+      const realOpen = actualFs.open as (p: string, ...a: unknown[]) => Promise<fsPromises.FileHandle>;
+      const handle = await realOpen(path, ...args);
+      if (path === lockPath) {
+        handle.writeFile = (async () => {
+          await actualFs.writeFile(lockPath, 'pid ');
+        }) as typeof handle.writeFile;
+      }
+      return handle;
+    }) as unknown as typeof fsPromises.open);
+
+    try {
+      await makeTransactor(fx)['acquireLock']();
+
+      // The lock records this live process's complete pid, never a torn prefix.
+      expect(await fsPromises.readFile(lockPath, 'utf8')).toContain(`pid ${process.pid}`);
+
+      // A concurrent reclaimer sees a live holder and refuses, leaving the lock in place.
+      const err: unknown = await makeTransactor(fx)['clearDeadLock']().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(LockError);
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      vi.mocked(fsPromises.open).mockRestore();
+    }
+  });
 });
 
 describe('Transactor stale-lock reclaim', () => {
@@ -238,11 +331,11 @@ describe('Transactor stale-lock reclaim', () => {
     await fx.cleanup();
   });
 
-  it('refuses to start on an empty lockfile instead of clearing it, since a holder may be mid-acquire', async () => {
-    // acquireLock creates the lockfile with open('wx') and writes its pid on the next await,
-    // so a peer's lock is momentarily empty on disk. Reading '' yields no parseable pid, and
-    // clearing on "no pid" would delete that live holder's lock out from under it. Only a
-    // provably-dead holder is safe to clear; an unreadable pid must refuse, not clear.
+  it('refuses to start on an empty lockfile instead of clearing it, since it carries no pid to prove its holder dead', async () => {
+    // acquireLock publishes atomically (staging file + hard-link), so a correct holder's lock is
+    // never empty. An empty file yields no parseable pid, so it cannot be proven dead — clearing
+    // on "no pid" would delete a lock we cannot reason about. Only a provably-dead holder is safe
+    // to clear; an unparseable pid must refuse, not clear.
     const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
     await writeFile(lockPath, '');
 
@@ -250,16 +343,17 @@ describe('Transactor stale-lock reclaim', () => {
     const err: unknown = await transactor.reconcileAtStartup().catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(LockError);
-    // The empty (mid-acquire) lock must survive untouched.
+    // The empty lock — no pid to prove it dead — must survive untouched.
     expect(existsSync(lockPath)).toBe(true);
     expect(await fsPromises.readFile(lockPath, 'utf8')).toBe('');
   });
 
   it('clears a non-empty unparseable lockfile as crash debris, since a live holder never writes garbage', async () => {
-    // acquireLock only ever writes the serialized "pid N" payload, so non-empty unparseable
-    // content is a process that crashed mid-write — dead debris that must never block writes
-    // forever. It clears through the same safe rename-claim path a dead recorded pid takes,
-    // and (unlike an empty lock) does not refuse: garbage is not a live holder mid-acquire.
+    // acquireLock only ever links the complete serialized "pid N" payload, so non-empty
+    // unparseable content is a process that crashed mid-write — dead debris that must never
+    // block writes forever. It clears through the same safe rename-claim path a dead recorded
+    // pid takes, and (unlike an empty lock) does not refuse: garbage is crash debris, not a
+    // lock we must leave alone.
     const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
     await writeFile(lockPath, 'crashed mid-write\n');
     const renameSpy = vi.mocked(fsPromises.rename);

@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import { readFile, readlink, realpath, rm, type FileHandle } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -24,7 +25,12 @@ import {
 import { Transactor, type Identity } from './transaction.js';
 import { refuseExecutableFrontmatter, validateNoteContent, ValidationError } from './validate.js';
 
-const VERSION = '0.1.0';
+// Single source of truth for the reported version: read it from package.json at load
+// rather than duplicating the literal. `../package.json` resolves the same from both src/
+// (tsx/vitest) and the compiled dist/ output, since each sits one directory below the root.
+export const VERSION: string = (
+  createRequire(import.meta.url)('../package.json') as { version: string }
+).version;
 
 // Must mirror MCPVault's own PathFilter.allowedExtensions exactly (currently
 // ['.md', '.markdown', '.txt', '.base', '.canvas']) — MCPVault's FrontmatterHandler runs
@@ -179,6 +185,57 @@ function commitMessageFor(tool: string, args: Record<string, unknown>): string {
 /** Raised when the inner MCPVault tool itself rejected the call mid-transaction. */
 class InnerToolError extends Error {
   override name = 'InnerToolError';
+}
+
+/**
+ * Runs one delegated write against a throwaway MCPVault bound to the clone `stage` and
+ * returns its non-error result. A fresh server+client is spun per staged call while the
+ * long-lived inner instance keeps serving reads, and both are closed even if one rejects —
+ * but what to throw is decided AFTER the close, surfacing the first close failure only when
+ * the call left no result to return (mirrors close()). Throwing from inside the finally
+ * would itself discard an in-flight exception, the exact masking bug this ordering avoids.
+ */
+async function callStagedTool(
+  stage: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const stageServer = createMcpVaultServer(stage, {
+    name: 'mcpvault-stage',
+    version: VERSION,
+  });
+  const [stageClientTransport, stageServerTransport] = InMemoryTransport.createLinkedPair();
+  const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
+  let callResult: CallToolResult | undefined;
+  let callError: unknown;
+  let closes: PromiseSettledResult<void>[] = [];
+  try {
+    await stageServer.connect(stageServerTransport);
+    await stageClient.connect(stageClientTransport);
+    callResult = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
+  } catch (err) {
+    callError = err;
+  } finally {
+    closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
+  }
+  // Prefer the real tool failure — a close rejection on top of it is noise that would
+  // otherwise mask the error the caller actually needs.
+  if (callError !== undefined) {
+    throw callError;
+  }
+  const failedClose = closes.find((r) => r.status === 'rejected');
+  if (failedClose && callResult === undefined) {
+    throw (failedClose as PromiseRejectedResult).reason;
+  }
+  // Reaching here means the staged call assigned a result — a rejection would have
+  // thrown callError above — so this both narrows the type and states that invariant.
+  if (callResult === undefined) {
+    throw new Error(`${name}: staged call resolved without a result`);
+  }
+  if (callResult.isError) {
+    throw new InnerToolError(textOf(callResult));
+  }
+  return callResult;
 }
 
 // Path-like arg keys across the READ_TOOLS set: a single note path (read_note,
@@ -437,47 +494,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         await assertWriteDestinationsContained(args, '', stage, realStage);
 
         const before = await manifestOf(stage);
-        // Fresh throwaway MCPVault bound to the clone; the long-lived inner instance keeps
-        // serving reads. Close client+server even if one rejects, surfacing the first
-        // failure — but only when the call left no result to return (mirrors close()).
-        const stageServer = createMcpVaultServer(stage, {
-          name: 'mcpvault-stage',
-          version: VERSION,
-        });
-        const [stageClientTransport, stageServerTransport] = InMemoryTransport.createLinkedPair();
-        const stageClient = new Client({ name: 'obsidian-git-mcp-stage', version: VERSION });
-        let callResult: CallToolResult | undefined;
-        let callError: unknown;
-        let closes: PromiseSettledResult<void>[] = [];
-        try {
-          await stageServer.connect(stageServerTransport);
-          await stageClient.connect(stageClientTransport);
-          callResult = (await stageClient.callTool({ name, arguments: args })) as CallToolResult;
-        } catch (err) {
-          callError = err;
-        } finally {
-          // Close in finally, but decide what to throw AFTER it — throwing from inside a
-          // finally would itself discard an in-flight exception, the exact masking bug this
-          // ordering avoids.
-          closes = await Promise.allSettled([stageClient.close(), stageServer.close()]);
-        }
-        // Prefer the real tool failure — a close rejection on top of it is noise that would
-        // otherwise mask the error the caller actually needs.
-        if (callError !== undefined) {
-          throw callError;
-        }
-        const failedClose = closes.find((r) => r.status === 'rejected');
-        if (failedClose && callResult === undefined) {
-          throw (failedClose as PromiseRejectedResult).reason;
-        }
-        // Reaching here means the staged call assigned a result — a rejection would have
-        // thrown callError above — so this both narrows the type and states that invariant.
-        if (callResult === undefined) {
-          throw new Error(`${name}: staged call resolved without a result`);
-        }
-        if (callResult.isError) {
-          throw new InnerToolError(textOf(callResult));
-        }
+        const callResult = await callStagedTool(stage, name, args);
 
         const after = await manifestOf(stage);
         await applyCloneDiff(vaultPath, realVaultPath, stage, before, after);

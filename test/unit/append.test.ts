@@ -129,6 +129,25 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two\n- three')).toBe(expected);
   });
 
+  it('keeps CRLF uniform when appending into a CRLF note that lacks a trailing newline', () => {
+    // A CRLF note read back without a trailing newline (common for Windows-authored or
+    // git-synced content) leaves its final line with no "\r" after the "\n" split, so the
+    // displaced former-last line must get its CRLF pair back and the new final line must not
+    // dangle a lone "\r" — otherwise the write-back stores mixed endings.
+    const note = ['## Log', '- a'].join('\r\n');
+    const expected = ['## Log', '- a', '- new'].join('\r\n');
+    expect(appendToSection(note, 'Log', '- new')).toBe(expected);
+  });
+
+  it('normalizes a multi-line append to CRLF in a CRLF note lacking a trailing newline', () => {
+    // Same no-trailing-newline note, but the appended block is multi-line: every line but
+    // the new last one takes a "\r", and the new last line stays bare to preserve the note's
+    // no-trailing-newline convention rather than dangle a CR with no LF to pair it.
+    const note = ['## Log', '- a'].join('\r\n');
+    const expected = ['## Log', '- a', '- new1', '- new2'].join('\r\n');
+    expect(appendToSection(note, 'Log', '- new1\n- new2')).toBe(expected);
+  });
+
   it('does not select a "##" line inside a fenced code block as the target section', () => {
     // The note has no real "Log" heading, only a fenced example that looks like one, so
     // this must fall through to creating the section at the end of the note.

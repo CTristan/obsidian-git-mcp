@@ -21,6 +21,11 @@
     "test": "vitest run"
   },
   "packageManager": "pnpm@10.20.0",
+  "pnpm": {
+    "overrides": {
+      "gray-matter": "4.0.3"
+    }
+  },
   "dependencies": {
     "@bitbonsai/mcpvault": "0.12.1",
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { link, lstat, open, readFile, rename, unlink } from 'node:fs/promises';
+import { link, lstat, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mapWithConcurrency } from './concurrency.js';
 import { runGit, type GitOptions } from './git.js';
@@ -179,10 +179,24 @@ export class Transactor {
   }
 
   private async acquireLock(): Promise<void> {
-    let handle;
+    // Publish the lock atomically. Writing the pid to a private staging file and hard-linking
+    // it onto lockPath means the lockfile, the instant it is visible, already holds the complete
+    // payload — never the empty or torn-write bytes a two-phase open('wx')-then-write exposes,
+    // which a peer's clearDeadLock could misread as crash debris and reclaim from a live holder.
+    // link() keeps open('wx')'s fail-if-exists guarantee: it throws EEXIST rather than clobbering
+    // a lock another process already holds. The staging file lives beside lockPath in .git, on
+    // the same filesystem link() requires, and is never synced or read as a lock.
+    const stagePath = `${this.lockPath}.acquire-${randomUUID()}`;
     try {
-      handle = await open(this.lockPath, 'wx');
+      await writeFile(stagePath, serializeLock(process.pid));
     } catch (err) {
+      await unlink(stagePath).catch(() => {});
+      throw err;
+    }
+    try {
+      await link(stagePath, this.lockPath);
+    } catch (err) {
+      await unlink(stagePath).catch(() => {});
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new LockError(
           `the vault write lock is already held (${this.lockPath}); ` +
@@ -191,16 +205,9 @@ export class Transactor {
       }
       throw err;
     }
-    // The lockfile already exists on disk here, so a failure writing or closing must
-    // remove it — otherwise the orphan blocks every write until the next restart.
-    try {
-      await handle.writeFile(serializeLock(process.pid));
-      await handle.close();
-    } catch (err) {
-      await handle.close().catch(() => {});
-      await unlink(this.lockPath).catch(() => {});
-      throw err;
-    }
+    // The link succeeded, so lockPath now points at the staged inode; drop the staging name,
+    // leaving the single lockPath hard link as the live lock.
+    await unlink(stagePath).catch(() => {});
   }
 
   /**
@@ -208,10 +215,11 @@ export class Transactor {
    * of acquisition. Clearing and taking the lock in one loop leaves no window where the lock
    * is free but unowned — the gap a separate clear-then-acquire opens, which a peer startup
    * (a rolling-restart overlap) could slip through to race reconcile's fetch/reset/clean/merge
-   * on the shared worktree. acquireLock is the atomic gate: open('wx') admits exactly one
-   * creator, so two processes can never both hold the lock. clearDeadLock only removes a lock
-   * it can prove dead and refuses on a live or mid-acquire holder, so a lost race to a
-   * concurrent startup just re-enters the loop, where the now-live winner makes clearDeadLock
+   * on the shared worktree. acquireLock is the atomic gate: it hard-links its fully-written pid
+   * file onto lockPath, and link admits exactly one creator (it throws EEXIST if the path already
+   * exists), so two processes can never both hold the lock. clearDeadLock only removes a lock
+   * it can prove dead and refuses on a live holder (or a lock it cannot prove dead), so a lost
+   * race to a concurrent startup just re-enters the loop, where the now-live winner makes clearDeadLock
    * refuse. The attempt cap turns pathological churn (a dead lock repeatedly re-planted) into
    * a refusal rather than an unbounded spin.
    */
@@ -230,8 +238,8 @@ export class Transactor {
         }
       }
       // Reached only when acquireLock found an existing lock. clearDeadLock throws (refuse)
-      // for a live or mid-acquire holder, or returns once a provably-dead lock is cleared —
-      // then the loop re-attempts the atomic acquire.
+      // for a live holder or a lock it cannot prove dead, or returns once a provably-dead lock
+      // is cleared — then the loop re-attempts the atomic acquire.
       await this.clearDeadLock();
     }
   }
@@ -252,12 +260,14 @@ export class Transactor {
    * the holder is alive — another server is actively writing this checkout (a rolling-restart
    * overlap), and ripping its lock out to reset the tree would corrupt that transaction.
    *
-   * A live pid is not the only outcome; the two no-pid cases split by content. An EMPTY lock
-   * ('') is a holder mid-acquire — acquireLock creates the file with open('wx') and writes its
-   * pid on the next await — so clearing it would delete a live lock; refuse. A NON-EMPTY
-   * unparseable lock (e.g. "crashed mid-write") is crash debris: a live acquirer only ever
-   * writes the serialized "pid N" payload, never garbage, so a garbage inode races nobody and
-   * clears safely — and a crashed holder's lock must never block writes forever.
+   * A live pid is not the only outcome; the two no-pid cases split by content. Because acquireLock
+   * publishes atomically — it writes the full "pid N" payload to a staging file, then hard-links
+   * it onto lockPath — a correct holder's lock is never observable empty or half-written. So an
+   * EMPTY lock ('') is not a mid-acquire holder but externally-created or crash-orphaned debris
+   * with no pid to prove its holder dead; refuse rather than guess. A NON-EMPTY unparseable lock
+   * (e.g. "crashed mid-write") is crash debris: a live acquirer only ever links the complete
+   * "pid N" payload, never garbage, so a garbage inode races nobody and clears safely — and a
+   * crashed holder's lock must never block writes forever.
    *
    * The clear is a claim, not a blind unlink. A path unlink races a peer that re-acquired
    * between the liveness read and the removal — it would delete the peer's fresh live lock,
@@ -277,13 +287,13 @@ export class Transactor {
       throw err;
     }
     if (contents === '') {
-      // Empty: acquireLock created the file with open('wx') but has not written its pid on the
-      // next await yet, so a holder may be mid-acquire right now — clearing would delete a live
-      // lock. Refuse and name the path: a crash in that microsecond window leaves genuinely-
-      // orphaned empty debris an operator must remove by hand.
+      // Empty: acquireLock publishes atomically (staging file + hard-link), so a correct holder's
+      // lock is never empty. An empty file therefore carries no pid to prove its holder dead, and
+      // clearing on "no pid" could delete a lock we cannot reason about — refuse rather than guess.
+      // Name the path so an operator can remove genuinely-orphaned empty debris by hand.
       throw new LockError(
-        `the vault lock at ${this.lockPath} is empty — a holder may be mid-acquire; refusing ` +
-          'to start. Remove it manually only if a process crashed between creating and writing it.',
+        `the vault lock at ${this.lockPath} is empty — it carries no holder pid to prove it dead; ` +
+          'refusing to start. Remove it manually only if it is orphaned debris.',
       );
     }
     // Our own pid counts as live too: a lockfile with this process's pid means another
@@ -311,10 +321,18 @@ export class Transactor {
     const claimed = await readFile(claimPath, 'utf8').catch(() => '');
     if (claimed !== contents) {
       // The bytes changed under us: a peer re-acquired between our read and the rename, so we
-      // moved their live lock. Restore it (link won't clobber a lock a newer acquire has since
-      // created at the path) and refuse, exactly as the live-pid check does.
-      await link(claimPath, this.lockPath).catch(() => {});
-      await unlink(claimPath).catch(() => {});
+      // moved their live lock. Restore it to the canonical path (link won't clobber a lock a
+      // newer acquire has since created there) and refuse, exactly as the live-pid check does.
+      // Only drop our private copy when that restore succeeds: a failed link means a third peer
+      // re-took lockPath in the gap, so claimPath now holds the displaced peer's only lock bytes,
+      // and unlinking it would leave that peer and the new lockPath holder both believing they
+      // hold exclusive access. Leave those bytes as named .reclaim- debris instead — safe to
+      // clear only once they are no longer a live peer's lock.
+      const restored = await link(claimPath, this.lockPath).then(
+        () => true,
+        () => false,
+      );
+      if (restored) await unlink(claimPath).catch(() => {});
       throw new LockError(
         `the vault lock at ${this.lockPath} was re-acquired while being cleared; refusing to start`,
       );
