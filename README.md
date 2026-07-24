@@ -20,7 +20,7 @@ The full build-vs-wrap evaluation — why the server wraps MCPVault instead of f
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH`. pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH` — 2.9 because the transaction wrapper suppresses host git hooks with `core.hooksPath`, a config key git added in 2.9. (Contributing to the repo needs a higher git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation — see [CONTRIBUTING.md](CONTRIBUTING.md).) pnpm isn't bundled with Node, so enable it via Corepack first — run `npm install --global corepack@latest` before `corepack enable pnpm`, because a stale bundled Corepack fails against current pnpm releases — or use pnpm's own installer at <https://pnpm.io/installation>:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git

@@ -65,7 +65,7 @@ Either way the git transaction layer, which is the point of the project, is unto
 
 Any of these accelerates or completes the handover:
 
-- An upgrade renames a path-carrying tool argument (the `MCPVAULT_TOOL_ARGS` snapshot goes red) or adds a tool the classification pin doesn't know (the contract suite's known-tool pin goes red). Both are now drift-tested, so a red pin — not a silent containment bypass — is the trigger.
+- An upgrade renames a path-carrying tool argument or adds a tool the classification pin doesn't know — the `MCPVAULT_TOOL_ARGS` snapshot catches both, because it reads MCPVault's live schema before the outer server filters it, so a rename changes a recorded value and a new tool adds an unexpected key. The contract suite's known-tool pin can't catch the new tool on its own, because the outer server drops unclassified tools from its listing before that pin asserts, which means the pin only guards our own classified sets. Either way the snapshot goes red — not a silent containment bypass — and that red is the trigger.
 - Upstream changes its frontmatter-engine handling in either direction, because a regression widens the exposure and a fix strands a vault-wide guard we can neither prove unnecessary nor delete while black-boxing.
 - A path-security regression lands in a release (the containment suite goes red on a version bump).
 - Any release injects non-content payloads into tool responses (an unsolicited ad-SDK pitch, [`bitbonsai/mcpvault#155`](https://github.com/bitbonsai/mcpvault/issues/155) opened 2026-07-23, is sitting open upstream). That one is immediate: pin, freeze, and swap.

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -48,6 +48,16 @@ export interface GitOptions {
 // option — that would drop the user's credential.helper and break authenticated pushes.
 const EMPTY_HOOKS_DIR = mkdtempSync(join(tmpdir(), 'ogm-nohooks-')).replaceAll('\\', '/');
 const DISABLE_HOOKS = ['-c', `core.hooksPath=${EMPTY_HOOKS_DIR}`];
+
+// The 'exit' handler must be synchronous — Node discards queued async work once teardown
+// begins — so cleanup is rmSync, not rm. It stays best-effort because 'exit' never fires on
+// SIGKILL or a hard crash, and a stranded empty dir is harmless, so a failed removal must
+// not mask the real exit reason.
+process.once('exit', () => {
+  try {
+    rmSync(EMPTY_HOOKS_DIR, { recursive: true, force: true });
+  } catch {}
+});
 
 /**
  * Run a git command via execFile with an argument array — never a shell string — so

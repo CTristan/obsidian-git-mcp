@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { lstat, open, readFile, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { link, lstat, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mapWithConcurrency } from './concurrency.js';
 import { runGit, type GitOptions } from './git.js';
@@ -89,14 +89,24 @@ const FINGERPRINT_CONCURRENCY = 64;
 const NETWORK_GIT_TIMEOUT_MS = 300_000;
 
 /**
- * The vault lockfile records its holder's pid so releaseStaleLock can tell a live
+ * The vault lockfile records its holder's pid so clearDeadLock can tell a live
  * cross-process holder (refuse to start) from a crash-orphaned one (safe to clear). The
  * writer and parser below share this prefix because a desync between them is silently
- * catastrophic: if the parser stopped matching the write format, releaseStaleLock would
- * read no pid, treat a live holder as dead, and unlink its lock — letting a concurrent
+ * catastrophic: if the parser stopped matching the write format, clearDeadLock would
+ * read no pid, treat a live holder as dead, and clear its lock — letting a concurrent
  * cross-process transaction corrupt the shared checkout.
  */
 const LOCK_PID_PREFIX = 'pid ';
+
+/**
+ * How many times acquireLockClearingStale re-attempts the atomic acquire after clearing a
+ * dead lock before giving up. Each clear→acquire round can lose the race to a concurrent
+ * startup that acquires first, but a live winner makes the next clear refuse outright, so
+ * this bound only guards against pathological churn (a dead lock repeatedly re-planted)
+ * rather than a real deadlock — a small ceiling suffices, and exceeding it means something
+ * is wrong with the checkout, so refuse to start rather than spin.
+ */
+const STALE_RECLAIM_ATTEMPTS = 10;
 
 function serializeLock(pid: number): string {
   return `${LOCK_PID_PREFIX}${pid} at ${new Date().toISOString()}\n`;
@@ -189,6 +199,39 @@ export class Transactor {
     }
   }
 
+  /**
+   * Acquire the write lock at startup, clearing a provably-dead holder's stale lock as part
+   * of acquisition. Clearing and taking the lock in one loop leaves no window where the lock
+   * is free but unowned — the gap a separate clear-then-acquire opens, which a peer startup
+   * (a rolling-restart overlap) could slip through to race reconcile's fetch/reset/clean/merge
+   * on the shared worktree. acquireLock is the atomic gate: open('wx') admits exactly one
+   * creator, so two processes can never both hold the lock. clearDeadLock only removes a lock
+   * it can prove dead and refuses on a live or mid-acquire holder, so a lost race to a
+   * concurrent startup just re-enters the loop, where the now-live winner makes clearDeadLock
+   * refuse. The attempt cap turns pathological churn (a dead lock repeatedly re-planted) into
+   * a refusal rather than an unbounded spin.
+   */
+  private async acquireLockClearingStale(): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.acquireLock();
+        return;
+      } catch (err) {
+        if (!(err instanceof LockError)) throw err;
+        if (attempt >= STALE_RECLAIM_ATTEMPTS) {
+          throw new LockError(
+            `the vault lock at ${this.lockPath} kept being re-taken by concurrent startups ` +
+              `across ${attempt} reclaim attempts; refusing to start`,
+          );
+        }
+      }
+      // Reached only when acquireLock found an existing lock. clearDeadLock throws (refuse)
+      // for a live or mid-acquire holder, or returns once a provably-dead lock is cleared —
+      // then the loop re-attempts the atomic acquire.
+      await this.clearDeadLock();
+    }
+  }
+
   private async releaseLock(): Promise<void> {
     await unlink(this.lockPath).catch((err) => {
       // A missing lockfile is fine (already released); anything else deserves a trace,
@@ -200,29 +243,81 @@ export class Transactor {
   }
 
   /**
-   * Remove a leftover lockfile only when its recorded holder is dead. A live pid means
-   * another server is actively writing this checkout (e.g. a rolling restart overlap) —
-   * ripping its lock out and resetting the tree would corrupt that transaction, so we
-   * refuse to start instead.
+   * Clear a leftover lockfile only when its recorded holder is provably dead, leaving the
+   * path free for acquireLockClearingStale's next acquire. Refuses (throws LockError) when
+   * the holder is alive — another server is actively writing this checkout (a rolling-restart
+   * overlap), and ripping its lock out to reset the tree would corrupt that transaction.
+   *
+   * A live pid is not the only outcome; the two no-pid cases split by content. An EMPTY lock
+   * ('') is a holder mid-acquire — acquireLock creates the file with open('wx') and writes its
+   * pid on the next await — so clearing it would delete a live lock; refuse. A NON-EMPTY
+   * unparseable lock (e.g. "crashed mid-write") is crash debris: a live acquirer only ever
+   * writes the serialized "pid N" payload, never garbage, so a garbage inode races nobody and
+   * clears safely — and a crashed holder's lock must never block writes forever.
+   *
+   * The clear is a claim, not a blind unlink. A path unlink races a peer that re-acquired
+   * between the liveness read and the removal — it would delete the peer's fresh live lock,
+   * the exact corruption the pid check exists to prevent. Instead we rename the inspected
+   * inode to a private path: rename is atomic, so only one racing reclaimer moves a given
+   * inode, and we then confirm the bytes we moved are still the dead lock we inspected. If
+   * they changed, a peer re-acquired in the gap and we displaced their live lock, so we put
+   * it back (link, which won't clobber a lock a newer acquire has since created) and refuse.
    */
-  private async releaseStaleLock(): Promise<void> {
+  private async clearDeadLock(): Promise<void> {
     let contents: string;
     try {
       contents = await readFile(this.lockPath, 'utf8');
     } catch (err) {
+      // Vanished — a peer already cleared it; nothing to clear, let the caller retry acquire.
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw err;
+    }
+    if (contents === '') {
+      // Empty: acquireLock created the file with open('wx') but has not written its pid on the
+      // next await yet, so a holder may be mid-acquire right now — clearing would delete a live
+      // lock. Refuse and name the path: a crash in that microsecond window leaves genuinely-
+      // orphaned empty debris an operator must remove by hand.
+      throw new LockError(
+        `the vault lock at ${this.lockPath} is empty — a holder may be mid-acquire; refusing ` +
+          'to start. Remove it manually only if a process crashed between creating and writing it.',
+      );
     }
     // Our own pid counts as live too: a lockfile with this process's pid means another
     // Transactor in this same process holds it (the lockfile, not the in-process mutex,
     // is what separates two Transactors on one checkout).
     const pid = parseLockPid(contents);
-    if (pid && this.isProcessAlive(pid)) {
+    if (pid !== undefined && this.isProcessAlive(pid)) {
       throw new LockError(
         `the vault lock at ${this.lockPath} is held by live pid ${pid}; refusing to start`,
       );
     }
-    await this.releaseLock();
+    // A dead recorded pid, or non-empty unparseable crash debris — both are safe to clear, and
+    // a crashed holder's lock must never block writes forever. Claim the inode with an atomic
+    // rename (only one racer moves a given inode), then confirm the bytes we moved are the ones
+    // we inspected; a live acquirer's payload is always the serialized "pid N", never garbage,
+    // so this claim races nobody except a peer that re-acquired in the read→rename gap.
+    const claimPath = `${this.lockPath}.reclaim-${randomUUID()}`;
+    try {
+      await rename(this.lockPath, claimPath);
+    } catch (err) {
+      // Another reclaimer won the rename; the path is already clear, let the caller retry.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+    const claimed = await readFile(claimPath, 'utf8').catch(() => '');
+    if (claimed !== contents) {
+      // The bytes changed under us: a peer re-acquired between our read and the rename, so we
+      // moved their live lock. Restore it (link won't clobber a lock a newer acquire has since
+      // created at the path) and refuse, exactly as the live-pid check does.
+      await link(claimPath, this.lockPath).catch(() => {});
+      await unlink(claimPath).catch(() => {});
+      throw new LockError(
+        `the vault lock at ${this.lockPath} was re-acquired while being cleared; refusing to start`,
+      );
+    }
+    // Byte-identical to the dead lock we inspected: drop our private copy, freeing the path
+    // for the caller's next acquire.
+    await unlink(claimPath).catch(() => {});
   }
 
   private isProcessAlive(pid: number): boolean {
@@ -377,16 +472,14 @@ export class Transactor {
    */
   async reconcileAtStartup(): Promise<void> {
     // A crashed process can't release its lock, and the lock lives in .git/ where tree
-    // recovery never looks — but only a DEAD holder's lock is safe to clear.
-    await this.releaseStaleLock();
-    // Hold the same on-disk lock transact() and readTransaction() take, over the whole
-    // reconcile: releaseStaleLock cleared only a dead holder's lock, so from here a peer
-    // process (a rolling-restart overlap) could otherwise slip into transact() and race
-    // these fetch/reset/clean/merge mutations on the shared worktree. acquireLock sits
-    // outside the try (same invariant as the siblings): a failed acquire must never reach
-    // the finally that unlinks the lockfile. releaseStaleLock already removed any lock we'd
-    // collide with, so this fresh acquire cannot deadlock on our own prior lock.
-    await this.acquireLock();
+    // recovery never looks — but only a DEAD holder's lock is safe to clear. Clear it and
+    // take our own lock in one atomic loop: a separate clear-then-acquire leaves a window
+    // where the lock is free but unowned, and a peer process (a rolling-restart overlap) could
+    // slip into transact() through it and race these fetch/reset/clean/merge mutations on the
+    // shared worktree. The acquire sits outside the try (same invariant as transact() and
+    // readTransaction()): a failed or refused acquire must never reach the finally that
+    // unlinks the lockfile, because that would unlink a live peer's lock.
+    await this.acquireLockClearingStale();
     try {
       await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
         timeoutMs: NETWORK_GIT_TIMEOUT_MS,
