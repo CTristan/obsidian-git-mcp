@@ -6,6 +6,7 @@ import { createFixture, git, SEED_NOTES, type Fixture } from '../fixture.js';
 import {
   callTool,
   commitShaOf,
+  expectCleanCheckout,
   SERVICE_EMAIL,
   SERVICE_NAME,
   startServer,
@@ -119,9 +120,8 @@ describe('writes', () => {
     // The delegated write runs against a private clone; when the inner tool errors (here a
     // patch whose oldString is nowhere in the note), nothing is copied back and the
     // transaction aborts — so both the local checkout and the remote stay exactly as they
-    // were. HEAD-unchanged (not merely a clean working tree) rules out a local commit that
-    // silently failed to push.
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    // were. A checkout with no commit ahead of the remote (not merely a clean working tree)
+    // rules out a local commit that silently failed to push.
     const preRemote = await fx.bareHead();
 
     const res = await callTool(srv.client, 'patch_note', {
@@ -131,8 +131,7 @@ describe('writes', () => {
     });
     expect(res.isError).toBe(true);
 
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectCleanCheckout(fx);
     expect(await fx.bareHead()).toBe(preRemote);
   });
 });

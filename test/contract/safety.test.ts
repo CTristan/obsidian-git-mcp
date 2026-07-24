@@ -6,8 +6,10 @@ import { createFixture, git, type Fixture } from '../fixture.js';
 import {
   callTool,
   commitShaOf,
+  expectCleanCheckout,
   expectRolledBack,
   headShaOf,
+  onceHook,
   snapshot,
   startServer,
   textOf,
@@ -110,15 +112,11 @@ describe('transaction safety', () => {
   });
 
   it('a non-conflicting concurrent push is absorbed by bounded retry', async () => {
-    let fired = false;
     srv = await startServer(fx, {
       testHooks: {
-        beforePush: async () => {
-          if (!fired) {
-            fired = true;
-            await fx.collabWrite('Inbox/Other.md', 'other\n', 'collab: add Other');
-          }
-        },
+        beforePush: onceHook(async () => {
+          await fx.collabWrite('Inbox/Other.md', 'other\n', 'collab: add Other');
+        }),
       },
     });
 
@@ -138,18 +136,13 @@ describe('transaction safety', () => {
 
   it('a conflicting concurrent edit is refused and nothing is lost', async () => {
     const collabVersion = '# Alpha\n\nCollaborator rewrote everything.\n';
-    let fired = false;
     srv = await startServer(fx, {
       testHooks: {
-        beforePush: async () => {
-          if (!fired) {
-            fired = true;
-            await fx.collabWrite('Projects/Alpha.md', collabVersion, 'collab: rewrite Alpha');
-          }
-        },
+        beforePush: onceHook(async () => {
+          await fx.collabWrite('Projects/Alpha.md', collabVersion, 'collab: rewrite Alpha');
+        }),
       },
     });
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
 
     const res = await callTool(srv.client, 'patch_note', {
       path: 'Projects/Alpha.md',
@@ -161,8 +154,7 @@ describe('transaction safety', () => {
 
     // The collaborator's version survives untouched on the remote.
     expect(await fx.remoteFile('Projects/Alpha.md')).toBe(collabVersion);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectCleanCheckout(fx);
   });
 
   it('a clean rebase that splices in invalid content is refused, not pushed', async () => {
@@ -187,18 +179,13 @@ describe('transaction safety', () => {
       '- Ship early.',
       '',
     ].join('\n');
-    let fired = false;
     srv = await startServer(fx, {
       testHooks: {
-        beforePush: async () => {
-          if (!fired) {
-            fired = true;
-            await fx.collabWrite('Projects/Alpha.md', collabVersion, 'collab: break frontmatter');
-          }
-        },
+        beforePush: onceHook(async () => {
+          await fx.collabWrite('Projects/Alpha.md', collabVersion, 'collab: break frontmatter');
+        }),
       },
     });
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
 
     const res = await callTool(srv.client, 'patch_note', {
       path: 'Projects/Alpha.md',
@@ -212,8 +199,7 @@ describe('transaction safety', () => {
     // content, which spliced our valid body edit onto their broken frontmatter, must
     // never reach the remote unvalidated.
     expect(await fx.remoteFile('Projects/Alpha.md')).toBe(collabVersion);
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectCleanCheckout(fx);
   });
 
   it('a mid-transaction failure restores the checkout exactly', async () => {
@@ -240,16 +226,13 @@ describe('transaction safety', () => {
     // further, and our push attempt then fails — with zero retries left. The transaction
     // must recognize its commit already landed instead of rolling back and reporting
     // "nothing was changed" for a write that is on the remote.
-    let fired = false;
     srv = await startServer(fx, {
       maxPushRetries: 0,
       testHooks: {
-        beforePush: async () => {
-          if (fired) return;
-          fired = true;
+        beforePush: onceHook(async () => {
           await git(['push', 'origin', 'HEAD:main'], fx.serverDir);
           await fx.collabWrite('Inbox/Other.md', 'other\n', 'collab: on top');
-        },
+        }),
       },
     });
 

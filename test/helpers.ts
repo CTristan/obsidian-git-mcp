@@ -55,6 +55,20 @@ export async function startServer(
   };
 }
 
+/**
+ * Wraps a `beforePush` callback so it fires exactly once, however many times the retry loop
+ * invokes the hook — the concurrent-write simulations need the collaborator to race in on the
+ * first push attempt only, not again on every bounded retry.
+ */
+export function onceHook(fn: () => Promise<void>): () => Promise<void> {
+  let fired = false;
+  return async () => {
+    if (fired) return;
+    fired = true;
+    await fn();
+  };
+}
+
 export async function callTool(
   client: Client,
   name: string,
