@@ -1,4 +1,4 @@
-import { isAbsolute, normalize } from 'node:path';
+import { isAbsolute, normalize } from 'node:path/posix';
 
 // Second defense layer under MCPVault's PathFilter: the wrapper re-checks every path it
 // touches itself (append_to_section) and every path a transaction actually changed,

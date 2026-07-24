@@ -273,6 +273,29 @@ describe('Transactor stale-lock reclaim', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it.each([0, -1])(
+    'clears a lockfile recording non-positive pid %d as corruption, never treating it as a live holder',
+    async (corruptPid) => {
+      // serializeLock always records Node's process.pid, which is positive, so a non-positive
+      // pid can only come from a corrupted or tampered lockfile. It matters because process.kill
+      // reinterprets a non-positive pid as a process GROUP, not the recorded holder: kill(0, 0)
+      // queries the caller's own group and kill(-1, 0) broadcasts, both of which answer "alive"
+      // unconditionally. An unguarded liveness check would then read such a lock as a live holder
+      // forever and deadlock the crash-recovery path, so parseLockPid must reject it and let the
+      // non-empty-garbage branch clear it through the same safe rename-claim a dead pid takes.
+      const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+      await writeFile(lockPath, `pid ${corruptPid} at ${new Date().toISOString()}\n`);
+      const renameSpy = vi.mocked(fsPromises.rename);
+      renameSpy.mockClear();
+
+      const transactor = makeTransactor(fx);
+      await transactor.reconcileAtStartup();
+
+      expect(renameSpy.mock.calls.some(([from]) => from === lockPath)).toBe(true);
+      expect(existsSync(lockPath)).toBe(false);
+    },
+  );
+
   it('reclaims a provably-dead stale lock by renaming it aside, never by blind-unlinking the path', async () => {
     // A blind unlink(lockPath) races a peer that re-acquired between the liveness read and the
     // removal — it would delete the peer's fresh live lock. The fix claims the inspected inode

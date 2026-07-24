@@ -115,7 +115,11 @@ function serializeLock(pid: number): string {
 function parseLockPid(contents: string): number | undefined {
   if (!contents.startsWith(LOCK_PID_PREFIX)) return undefined;
   const pid = Number.parseInt(contents.slice(LOCK_PID_PREFIX.length), 10);
-  return Number.isNaN(pid) ? undefined : pid;
+  // A non-positive pid never comes from serializeLock (Node's process.pid is always positive),
+  // so it's corruption, not a holder. Rejecting it here routes such a lock into the non-empty-
+  // garbage → clear branch, because feeding a non-positive value to process.kill(pid, 0) targets
+  // a process GROUP that answers "alive" unconditionally — deadlocking crash recovery forever.
+  return Number.isNaN(pid) || pid <= 0 ? undefined : pid;
 }
 
 /**

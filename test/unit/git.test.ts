@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GitError, runGit } from '../../src/git.js';
 
+// Pin both config layers on every git call so host insteadOf, a credential helper, a proxy, or a
+// leaked core.hooksPath can't change a command's behavior and make an assertion
+// environment-dependent. Isolation callers take the default empty global config; the
+// hook-neutralization tests pass their simulated-host config to prove runGit neutralizes it anyway.
+function isolatedGitEnv(globalConfig = '/dev/null'): Record<string, string> {
+  return { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' };
+}
+
 describe('GitError credential redaction', () => {
   let dir: string;
 
@@ -38,6 +46,7 @@ describe('GitError credential redaction', () => {
     const err: unknown = await runGit(
       ['fetch', 'https://user:sekret@example.invalid/repo.git'],
       dir,
+      { env: isolatedGitEnv() },
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitError);
     expect((err as GitError).message).not.toContain('sekret');
@@ -102,9 +111,7 @@ describe('runGit host hook neutralization', () => {
       globalConfig,
       `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[core]\n\thooksPath = ${hooksDir}\n`,
     );
-    await runGit(['init', '.'], dir, {
-      env: { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' },
-    });
+    await runGit(['init', '.'], dir, { env: isolatedGitEnv(globalConfig) });
   });
 
   afterEach(async () => {
@@ -117,7 +124,7 @@ describe('runGit host hook neutralization', () => {
     // code. runGit must neutralize it per-invocation, so this commit completes and leaves
     // no marker even though the (simulated) host global config points straight at the hook.
     await runGit(['commit', '--allow-empty', '-m', 'probe'], dir, {
-      env: { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' },
+      env: isolatedGitEnv(globalConfig),
     });
     expect(existsSync(markerPath)).toBe(false);
   });

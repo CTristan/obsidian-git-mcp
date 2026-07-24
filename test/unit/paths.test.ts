@@ -88,6 +88,9 @@ describe('canonicalization drift guard', () => {
     const filter = new PathFilter() as unknown as {
       canonicalizeForMatch(path: string): string;
     };
+    // Fail informatively if an upstream rename removes the method the cast assumes,
+    // instead of letting the loop below die with an opaque TypeError.
+    expect(typeof filter.canonicalizeForMatch).toBe('function');
     const restricted = ['.git', '.obsidian'];
     const decorations = ['', '.', ' ', '..', '  ', '. ', ' .', '. .', ' . '];
     for (const name of restricted) {

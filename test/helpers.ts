@@ -19,14 +19,16 @@ export const SERVICE_EMAIL = 'service@obsidian-git-mcp.local';
 /** Boot the server under test against the fixture checkout and hand back a connected MCP client. */
 export async function startServer(
   fixture: Fixture,
-  overrides: Partial<VaultServerConfig> = {},
+  overrides: Omit<Partial<VaultServerConfig>, 'vaultPath'> = {},
 ): Promise<TestServer> {
   const server = await createVaultServer({
-    vaultPath: fixture.serverDir,
     collaborator: TEST_COLLABORATOR,
     // Zero throttle so read-freshness behavior is deterministic in tests.
     readFreshnessMs: 0,
     ...overrides,
+    // vaultPath stays last so overrides can never repoint the server outside the
+    // fixture sandbox — startup reconciliation hard-resets whatever it points at.
+    vaultPath: fixture.serverDir,
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'contract-tests', version: '0.0.0' });

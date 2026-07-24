@@ -120,6 +120,15 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('normalizes every line of a multi-line append to CRLF in an existing CRLF section', () => {
+    // Multi-line input is split on "\n" and each line re-normalized to the note's EOL, so
+    // appending "- two\n- three" into a CRLF note must land BOTH lines CRLF-terminated —
+    // an LF line spliced into CRLF bytes would leave the stored note with mixed endings.
+    const note = ['# T', '', '## Log', '', '- one', ''].join('\r\n');
+    const expected = ['# T', '', '## Log', '', '- one', '- two', '- three', ''].join('\r\n');
+    expect(appendToSection(note, 'Log', '- two\n- three')).toBe(expected);
+  });
+
   it('does not select a "##" line inside a fenced code block as the target section', () => {
     // The note has no real "Log" heading, only a fenced example that looks like one, so
     // this must fall through to creating the section at the end of the note.
