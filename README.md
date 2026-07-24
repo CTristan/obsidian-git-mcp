@@ -20,7 +20,14 @@ The full build-vs-wrap evaluation — why the server wraps MCPVault instead of f
 
 ## Installing
 
-Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH` — 2.9 because the transaction wrapper suppresses host git hooks with `core.hooksPath`, a config key git added in 2.9. (Contributing to the repo needs a higher git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation — see [CONTRIBUTING.md](CONTRIBUTING.md).) pnpm isn't bundled with Node, so enable it via Corepack. Node ≤ 24 ships Corepack, so run `corepack enable pnpm` directly — reach for `npm install --global corepack@latest` first only if that bundled Corepack is too stale to enable current pnpm releases, because on a version that already bundles Corepack the global install can clash with the existing shims. Node 25+ dropped bundled Corepack, so there you install it first with `npm install --global corepack@latest` and then `corepack enable pnpm`. Or skip Corepack entirely and use pnpm's own installer at <https://pnpm.io/installation>:
+Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.9 on `PATH` — 2.9 because the transaction wrapper suppresses host git hooks with `core.hooksPath`, a config key git added in 2.9. (Contributing to the repo needs a higher git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation — see [CONTRIBUTING.md](CONTRIBUTING.md).)
+
+pnpm isn't bundled with Node, so enable it via Corepack. Which command you run depends on your Node version, because Node 25 dropped the bundled Corepack that earlier versions ship:
+
+- **Node ≤ 24:** run `corepack enable pnpm` directly. Reach for `npm install --global corepack@latest` first only if that bundled Corepack is too stale to enable current pnpm releases, because on a version that already bundles Corepack the global install can clash with the existing shims.
+- **Node 25+:** install Corepack first with `npm install --global corepack@latest`, then run `corepack enable pnpm`.
+
+Or skip Corepack entirely and use pnpm's own installer at <https://pnpm.io/installation>. Once pnpm is available:
 
 ```sh
 git clone https://github.com/CTristan/obsidian-git-mcp.git

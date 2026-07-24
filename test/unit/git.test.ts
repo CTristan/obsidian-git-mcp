@@ -102,7 +102,9 @@ describe('runGit host hook neutralization', () => {
       globalConfig,
       `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[core]\n\thooksPath = ${hooksDir}\n`,
     );
-    await runGit(['init', '.'], dir);
+    await runGit(['init', '.'], dir, {
+      env: { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' },
+    });
   });
 
   afterEach(async () => {
