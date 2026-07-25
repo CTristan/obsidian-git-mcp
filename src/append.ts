@@ -120,11 +120,14 @@ export function appendToSection(content: string, heading: string, text: string):
       );
     }
     const eol = useCRLF ? '\r\n' : '\n';
+    const isBlank = content.trim() === '';
+    const hasBlankSeparator = /(?:\r?\n){2,}$/.test(content);
     const trimmed = content.replace(/[\r\n]+$/, '');
     const body = text.split('\n').map((l) => l.replace(/\r$/, '')).join(eol);
     // Skip the leading blank separator when the note is empty (or only newlines), so a
-    // brand-new note starts with the heading rather than two blank lines before it.
-    const prefix = trimmed === '' ? '' : `${trimmed}${eol}${eol}`;
+    // brand-new note starts with the heading rather than two blank lines before it. When
+    // the note already has a blank separator, preserve every existing trailing blank line.
+    const prefix = isBlank ? '' : hasBlankSeparator ? content : `${trimmed}${eol}${eol}`;
     return `${prefix}## ${wanted}${eol}${eol}${body}${eol}`;
   }
 

@@ -166,6 +166,13 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- started')).toBe(`${note}\n## Log\n\n- started\n`);
   });
 
+  it('preserves every trailing blank line when creating a missing section', () => {
+    const note = '# T\n\n\n';
+    expect(appendToSection(note, 'Log', '- started')).toBe(
+      '# T\n\n\n## Log\n\n- started\n',
+    );
+  });
+
   it('keeps a wider fence open across a narrower inner run of the same marker', () => {
     // A 4-backtick fence is closed only by another run of 4+ backticks — a 3-backtick
     // line inside it (e.g. documenting the fence syntax itself) must not close it, so

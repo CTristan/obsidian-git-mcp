@@ -3,7 +3,12 @@ import { isAbsolute, normalize } from 'node:path/posix';
 // Second defense layer under MCPVault's PathFilter: the wrapper re-checks every path it
 // touches itself (append_to_section) and every path a transaction actually changed,
 // because trusting a single layer means one bypass loses the vault.
-const RESTRICTED_SEGMENTS = new Set(['.obsidian', '.git']);
+const RESTRICTED_SEGMENTS = new Set([
+  '.obsidian',
+  '.git',
+  '.gitattributes',
+  '.gitmodules',
+]);
 
 // Windows reserves CON, PRN, AUX, NUL, COM1-COM9, and LPT1-LPT9 as device names with any
 // extension, so "NUL.md" still resolves to the device and the write silently drops instead

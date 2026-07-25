@@ -1,16 +1,29 @@
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { GitError, runGit } from '../../src/git.js';
 
 // Pin both config layers on every git call so host insteadOf, a credential helper, a proxy, or a
 // leaked core.hooksPath can't change a command's behavior and make an assertion
 // environment-dependent. Isolation callers take the default empty global config; the
 // hook-neutralization tests pass their simulated-host config to prove runGit neutralizes it anyway.
-function isolatedGitEnv(globalConfig = '/dev/null'): Record<string, string> {
-  return { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: '/dev/null' };
+let emptyConfigDir: string;
+let emptyConfig: string;
+
+beforeAll(async () => {
+  emptyConfigDir = await mkdtemp(join(tmpdir(), 'ogm-git-config-'));
+  emptyConfig = join(emptyConfigDir, 'gitconfig');
+  await writeFile(emptyConfig, '');
+});
+
+afterAll(async () => {
+  await rm(emptyConfigDir, { recursive: true, force: true });
+});
+
+function isolatedGitEnv(globalConfig = emptyConfig): Record<string, string> {
+  return { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: emptyConfig };
 }
 
 describe('GitError credential redaction', () => {
@@ -79,6 +92,7 @@ describe('runGit timeout', () => {
     // GitOptions had no timeoutMs field and this would hang for the full 30s.
     const start = Date.now();
     const err: unknown = await runGit(['hash-object', '--stdin'], dir, {
+      env: isolatedGitEnv(),
       timeoutMs: 200,
     }).catch((e: unknown) => e);
     const elapsed = Date.now() - start;
@@ -186,11 +200,41 @@ describe('runGit host execution-vector neutralization', () => {
     expect(existsSync(markerPath)).toBe(false);
   });
 
+  it('does not run a host filter command selected by an in-tree .gitattributes', async () => {
+    await writeFile(join(dir, '.gitattributes'), '*.md filter=probe\n');
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[filter "probe"]\n\tclean = ${probePath}\n`,
+    );
+    await writeFile(join(dir, 'note.md'), 'body\n');
+
+    await runGit(['add', '.gitattributes', 'note.md'], dir, {
+      env: isolatedGitEnv(globalConfig),
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
   it('does not run an explicitly supplied ext transport command', async () => {
     await runGit(['ls-remote', `ext::${probePath}`], dir, {
       env: isolatedGitEnv(globalConfig),
     }).catch(() => {});
 
     expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('does not inherit ambient GIT_DIR redirection from the server process', async () => {
+    const previous = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(probeDir, 'not-the-repository');
+    try {
+      expect(
+        await runGit(['rev-parse', '--show-toplevel'], dir, {
+          env: isolatedGitEnv(globalConfig),
+        }),
+      ).toBe(await realpath(dir));
+    } finally {
+      if (previous === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previous;
+    }
   });
 });

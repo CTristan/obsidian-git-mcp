@@ -9,6 +9,7 @@ import {
   commitShaOf,
   commitSymlink,
   commitSymlinkChain,
+  expectCleanCheckout,
   expectRolledBack,
   SERVICE_EMAIL,
   SERVICE_NAME,
@@ -90,7 +91,7 @@ describe('destructive tools', () => {
 
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
   });
 
   it('move_file works when destructive tools are enabled', async () => {
@@ -108,7 +109,7 @@ describe('destructive tools', () => {
 
     expect(await git(['show', 'main:Archive/Beta.md'], fx.bareDir)).toContain('squirrels');
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
   });
 
   it('delete_note works when destructive tools are enabled', async () => {
@@ -123,7 +124,7 @@ describe('destructive tools', () => {
     await expectAttributedCommit(res, fx);
 
     await expect(git(['show', 'main:Inbox/Beta.md'], fx.bareDir)).rejects.toThrow();
-    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+    await expectCleanCheckout(fx);
   });
 
   it('delete_note through a symlink is refused without deleting the external target', async () => {

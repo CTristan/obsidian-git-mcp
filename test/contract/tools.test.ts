@@ -49,8 +49,12 @@ describe('wrapper-added tools', () => {
       'append_to_section',
     ]);
     const { tools } = await srv.client.listTools();
-    for (const tool of tools) {
-      expect(KNOWN.has(tool.name), `unclassified tool listed: ${tool.name}`).toBe(true);
+    const listed = new Set(tools.map((tool) => tool.name));
+    for (const name of listed) {
+      expect(KNOWN.has(name), `unclassified tool listed: ${name}`).toBe(true);
+    }
+    for (const name of KNOWN) {
+      expect(listed.has(name), `classified tool missing from listing: ${name}`).toBe(true);
     }
   });
 

@@ -285,7 +285,7 @@ describe('cloneWorktree failure cleanup', () => {
       await writeFile(secret, '# secret\n');
       await chmod(secret, 0o000);
 
-      await expect(cloneWorktree(vaultPath)).rejects.toThrow();
+      await expect(cloneWorktree(vaultPath)).rejects.toMatchObject({ code: 'EACCES' });
 
       const leftovers = (await readdir(tmpRoot)).filter((n) => n.startsWith('ogm-stage-'));
       expect(leftovers).toEqual([]);
@@ -532,6 +532,44 @@ describe('openPinnedHandle path pinning', () => {
       openPinnedHandle(link, link, await realpath(link), writeFlags, (message) => new Error(message)),
     ).rejects.toMatchObject({ code: 'ELOOP' });
     expect(await readFile(real, 'utf8')).toBe('seed\n');
+  });
+
+  it('accepts a distinct symlink-containing re-resolution path that still reaches the pinned file', async () => {
+    const realDir = join(root, 'real');
+    const linkedDir = join(root, 'linked');
+    await mkdir(realDir);
+    await symlink(realDir, linkedDir);
+    const target = join(realDir, 'note.md');
+    await writeFile(target, 'seed\n');
+    const expectedReal = await realpath(target);
+
+    const handle = await openPinnedHandle(
+      target,
+      join(linkedDir, 'note.md'),
+      expectedReal,
+      writeFlags,
+      (message) => new Error(message),
+    );
+    await handle.close();
+  });
+
+  it('refuses when a distinct re-resolution path no longer reaches the pinned file', async () => {
+    const target = join(root, 'note.md');
+    const decoy = join(root, 'decoy.md');
+    const link = join(root, 'link.md');
+    await writeFile(target, 'seed\n');
+    await writeFile(decoy, 'decoy\n');
+    await symlink(decoy, link);
+
+    await expect(
+      openPinnedHandle(
+        target,
+        link,
+        await realpath(target),
+        writeFlags,
+        (message) => new Error(message),
+      ),
+    ).rejects.toThrow(/path changed during the write/);
   });
 
   it('refuses when the resolved path no longer matches the expected canonical path', async () => {

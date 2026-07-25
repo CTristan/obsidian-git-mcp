@@ -15,6 +15,10 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('C:\\outside.md')).toBeDefined();
     expect(forbiddenPathReason('C:relative.md')).toBeDefined();
     expect(forbiddenPathReason('.git/config')).toBeDefined();
+    expect(forbiddenPathReason('.gitattributes')).toBeDefined();
+    expect(forbiddenPathReason('nested/.gitattributes')).toBeDefined();
+    expect(forbiddenPathReason('.gitmodules')).toBeDefined();
+    expect(forbiddenPathReason('nested/.gitmodules')).toBeDefined();
     expect(forbiddenPathReason('.obsidian/app.json')).toBeDefined();
     expect(forbiddenPathReason('nested/.obsidian/app.json')).toBeDefined();
     expect(forbiddenPathReason('-n')).toBeDefined();
@@ -95,14 +99,17 @@ describe('canonicalization drift guard', () => {
     expect(typeof filter.canonicalizeForMatch).toBe('function');
     const restricted = ['.git', '.obsidian'];
     const decorations = ['', '.', ' ', '..', '  ', '. ', ' .', '. .', ' . '];
+    let checked = 0;
     for (const name of restricted) {
       for (const lead of decorations) {
         for (const trail of decorations) {
           const segment = `${lead}${name}${trail}`;
           if (filter.canonicalizeForMatch(segment).toLowerCase() !== name) continue;
           expect(forbiddenPathReason(`${segment}/note.md`)).toBeDefined();
+          checked++;
         }
       }
     }
+    expect(checked).toBeGreaterThan(restricted.length);
   });
 });

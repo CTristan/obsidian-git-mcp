@@ -326,7 +326,6 @@ describe('transaction safety', () => {
     await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
 
     srv = await startServer(fx);
-    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
 
     // Present and ignored *before* the transaction starts — the specific case
     // changedPaths()/newlyIgnored can't see, since the path's ignored membership never
@@ -336,6 +335,7 @@ describe('transaction safety', () => {
     await mkdir(join(fx.serverDir, 'private'), { recursive: true });
     await writeFile(ignoredPath, original);
 
+    const { preHead, preRemote } = await snapshot(fx);
     const res = await callTool(srv.client, 'write_note', {
       path: 'private/notes.md',
       content: '# Secret\n\nmutated\n',
@@ -344,7 +344,7 @@ describe('transaction safety', () => {
     const postContent = await readFile(ignoredPath, 'utf8');
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('gitignore');
-    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    await expectRolledBack(fx, preRemote, preHead);
     // Restoring pre-existing ignored bytes needs the separate snapshot/refusal design
     // tracked by #11; this guard proves the mutation cannot masquerade as a committed write.
     expect(postContent).toBe('# Secret\n\nmutated\n');

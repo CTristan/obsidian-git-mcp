@@ -320,7 +320,7 @@ async function resolveSymlinkDestination(
  * containment predicate can't drift between callers.
  */
 function containmentReason(realRoot: string, resolved: string): string | undefined {
-  return resolved.startsWith(realRoot + sep)
+  return resolved === realRoot || resolved.startsWith(realRoot + sep)
     ? forbiddenPathReason(relative(realRoot, resolved))
     : 'refusing to follow a symlink outside the vault';
 }

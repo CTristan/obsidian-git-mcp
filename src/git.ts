@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -36,42 +36,95 @@ export interface GitOptions {
   timeoutMs?: number;
 }
 
-// Server-side git must never execute host-configured hook code: a global or system
-// core.hooksPath makes every fetch/push/commit run arbitrary host hooks. A command-line -c
-// outranks every config layer, so we redirect core.hooksPath to an empty directory we create
-// and own. Git resolves a hook by probing <hooksPath>/<hookname>, finds nothing in an empty
-// dir, and runs no hook — and that holds identically on Windows, macOS, and Linux, which
-// /dev/null does not: Git for Windows can read /dev/null as a literal relative path and even
-// create a dev/null directory rather than treating it as the null device. We forward-slash the
-// path because git parses a -c value like a config-file value, where a Windows temp path's
-// backslashes would read as escape sequences. Wiping global/system config wholesale isn't an
-// option — that would drop the user's credential.helper and break authenticated pushes.
-const EMPTY_HOOKS_DIR = mkdtempSync(join(tmpdir(), 'ogm-nohooks-')).replaceAll('\\', '/');
-const EMPTY_ATTRIBUTES_FILE = `${EMPTY_HOOKS_DIR}/attributes`;
-writeFileSync(EMPTY_ATTRIBUTES_FILE, '');
-const HARDENED_CONFIG = [
-  '--no-pager',
-  '-c',
-  `core.hooksPath=${EMPTY_HOOKS_DIR}`,
-  '-c',
-  `core.attributesFile=${EMPTY_ATTRIBUTES_FILE}`,
-  '-c',
-  'core.fsmonitor=false',
-  '-c',
-  'diff.external=',
-  '-c',
-  'protocol.ext.allow=never',
-];
+interface HardeningState {
+  dir: string;
+  args: string[];
+}
 
-// The 'exit' handler must be synchronous — Node discards queued async work once teardown
-// begins — so cleanup is rmSync, not rm. It stays best-effort because 'exit' never fires on
-// SIGKILL or a hard crash, and a stranded empty dir is harmless, so a failed removal must
-// not mask the real exit reason.
-process.once('exit', () => {
+let hardeningState: HardeningState | undefined;
+
+function hardenedConfig(): string[] {
+  if (hardeningState !== undefined) return hardeningState.args;
+
+  // Create hardening state only when a git call actually runs, so importing the package
+  // root for a pure helper has no filesystem side effect.
+  const dir = mkdtempSync(join(tmpdir(), 'ogm-git-hardening-'));
+  const hooksDir = join(dir, 'hooks');
+  const attributesFile = join(dir, 'attributes');
+  mkdirSync(hooksDir, { mode: 0o700 });
+  writeFileSync(attributesFile, '');
+  const forward = (value: string): string => value.replaceAll('\\', '/');
+  const args = [
+    '--no-pager',
+    '-c',
+    `core.hooksPath=${forward(hooksDir)}`,
+    '-c',
+    `core.attributesFile=${forward(attributesFile)}`,
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'diff.external=',
+    '-c',
+    'protocol.ext.allow=never',
+  ];
+  hardeningState = { dir, args };
+
+  // The 'exit' handler must be synchronous — Node discards queued async work once teardown
+  // begins. Cleanup stays best-effort because SIGKILL can strand a harmless private dir.
+  process.once('exit', () => {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {}
+  });
+  return args;
+}
+
+function gitEnv(overrides: Record<string, string> | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('GIT_')) env[key] = value;
+  }
+  return {
+    ...env,
+    ...overrides,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_EXTERNAL_DIFF: '',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
+const EXECUTION_CONFIG =
+  '^(filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv))$';
+
+async function configuredExecutionOverrides(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  base: string[],
+): Promise<string[]> {
+  let stdout: string;
   try {
-    rmSync(EMPTY_HOOKS_DIR, { recursive: true, force: true });
-  } catch {}
-});
+    ({ stdout } = await exec(
+      'git',
+      [...base, 'config', '--null', '--get-regexp', EXECUTION_CONFIG],
+      { cwd, env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+    ));
+  } catch (err) {
+    // git config exits 1 when no key matches; every other failure is real.
+    if ((err as { code?: number }).code === 1) return [];
+    throw err;
+  }
+
+  const keys = stdout
+    .split('\0')
+    .filter((entry) => entry !== '')
+    .map((entry) => entry.slice(0, entry.indexOf('\n')))
+    .filter((key) => key !== '');
+  const overrides: string[] = [];
+  for (const key of new Set(keys)) {
+    overrides.push('-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`);
+  }
+  return overrides;
+}
 
 /**
  * Run a git command via execFile with an argument array — never a shell string — so
@@ -84,17 +137,12 @@ export async function runGit(
   options: GitOptions = {},
 ): Promise<string> {
   try {
-    const { stdout } = await exec('git', [...HARDENED_CONFIG, ...args], {
+    const base = hardenedConfig();
+    const env = gitEnv(options.env);
+    const executionOverrides = await configuredExecutionOverrides(cwd, env, base);
+    const { stdout } = await exec('git', [...base, ...executionOverrides, ...args], {
       cwd,
-      // These forced values come last so no caller can re-enable interactive prompts or
-      // system-level attributes that select host-configured filter/textconv commands.
-      env: {
-        ...process.env,
-        ...options.env,
-        GIT_ATTR_NOSYSTEM: '1',
-        GIT_EXTERNAL_DIFF: '',
-        GIT_TERMINAL_PROMPT: '0',
-      },
+      env,
       timeout: options.timeoutMs ?? 30_000,
       maxBuffer: 16 * 1024 * 1024,
     });
