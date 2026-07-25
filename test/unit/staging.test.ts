@@ -192,7 +192,7 @@ describe('applyCloneDiff symlink safety', () => {
     expect(await readFile(join(outside, 'keep.md'), 'utf8')).toBe('# Keep\n');
   });
 
-  it('refuses a case-only rename when the filesystem resolves the destination casing differently', async () => {
+  it('handles a case-only rename without deleting the surviving file', async () => {
     await writeFile(join(vaultPath, 'Note.md'), 'before\n');
     await writeFile(join(cloneDir, 'note.md'), 'after\n');
     const entry = { size: 6n, mtimeNs: 2n, ino: 41n, isSymlink: false };
@@ -201,11 +201,27 @@ describe('applyCloneDiff symlink safety', () => {
     ]);
     const after: Manifest = new Map([['note.md', entry]]);
 
-    await expect(
-      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
-    ).rejects.toThrow(/path changed during the write/);
-
-    expect(await readFile(join(vaultPath, 'Note.md'), 'utf8')).toBe('before\n');
+    const caseInsensitive = await realpath(join(vaultPath, 'note.md'))
+      .then(() => true)
+      .catch(() => false);
+    const operation = applyCloneDiff(
+      vaultPath,
+      await realpath(vaultPath),
+      cloneDir,
+      before,
+      after,
+    );
+    if (caseInsensitive) {
+      // The exact-path pin refuses the differently cased destination before writing, so
+      // rollback can preserve the original file instead of unlinking the shared path.
+      await expect(operation).rejects.toThrow(/path changed during the write/);
+      expect(await readFile(join(vaultPath, 'Note.md'), 'utf8')).toBe('before\n');
+    } else {
+      // Distinct names on a case-sensitive filesystem make this an ordinary add+delete.
+      await operation;
+      expect(await readFile(join(vaultPath, 'note.md'), 'utf8')).toBe('after\n');
+      expect(existsSync(join(vaultPath, 'Note.md'))).toBe(false);
+    }
   });
 
   it('removes now-empty parent directories after cascading deletes', async () => {
