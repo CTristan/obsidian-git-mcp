@@ -501,6 +501,77 @@ describe('Transactor ignored-file change signal', () => {
     await fx.cleanup();
   });
 
+  it('checks every candidate for gitignore membership in one Git invocation', async () => {
+    await fx.collabWrite('.gitignore', 'private/\ncache/\n', 'collab: ignore private data');
+    await git(['fetch', 'origin', 'main'], fx.serverDir);
+    await git(['merge', '--ff-only', 'origin/main'], fx.serverDir);
+
+    const checkIgnoreCalls: string[][] = [];
+    const transactor = makeTransactor(fx, {
+      onGitCall: (args) => {
+        if (args[0] === 'check-ignore') checkIgnoreCalls.push([...args]);
+      },
+    });
+
+    const err: unknown = await transactor
+      .refuseIgnoredPaths([
+        'private/notes.md',
+        'Inbox/Beta.md',
+        'cache/state.json',
+        'private/notes.md',
+        '',
+      ])
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HiddenIgnoredWriteError);
+    expect((err as Error).message).toContain('private/notes.md, cache/state.json');
+    expect((err as Error).message).not.toContain('Inbox/Beta.md');
+    expect(checkIgnoreCalls).toEqual([
+      [
+        'check-ignore',
+        '--',
+        'private/notes.md',
+        'Inbox/Beta.md',
+        'cache/state.json',
+      ],
+    ]);
+  });
+
+  it('accepts an all-non-ignored candidate batch when Git reports no matches', async () => {
+    const runGitSpy = vi.mocked(gitModule.runGit);
+    runGitSpy.mockClear();
+    const transactor = makeTransactor(fx);
+
+    await expect(
+      transactor.refuseIgnoredPaths(['Inbox/Alpha.md', 'Inbox/Beta.md']),
+    ).resolves.toBeUndefined();
+
+    expect(runGitSpy).toHaveBeenCalledTimes(1);
+    expect(runGitSpy.mock.calls[0]?.[0]).toEqual([
+      'check-ignore',
+      '--',
+      'Inbox/Alpha.md',
+      'Inbox/Beta.md',
+    ]);
+  });
+
+  it('propagates an unexpected empty-stderr check-ignore failure', async () => {
+    const failure = new gitModule.GitError(
+      'git check-ignore failed',
+      ['check-ignore'],
+      '',
+      128,
+    );
+    const runGitSpy = vi.mocked(gitModule.runGit);
+    runGitSpy.mockRejectedValueOnce(failure);
+
+    const err: unknown = await makeTransactor(fx)
+      .refuseIgnoredPaths(['Inbox/Beta.md'])
+      .catch((e: unknown) => e);
+
+    expect(err).toBe(failure);
+  });
+
   it('fingerprints already-ignored files by stat, never by reading their content', async () => {
     // Regression guard for the perf fix: an ignored tree (e.g. .obsidian/) can hold
     // multi-MB files, and ignoredFingerprint() runs twice per transact(), so it must

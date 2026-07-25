@@ -79,6 +79,28 @@ describe('GitError credential redaction', () => {
   });
 });
 
+describe('GitError exit status', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ogm-git-'));
+    await runGit(['init', '.'], dir, { env: isolatedGitEnv() });
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('preserves the child process exit code for callers that interpret Git status', async () => {
+    const err: unknown = await runGit(['check-ignore', '--', 'not-ignored.md'], dir, {
+      env: isolatedGitEnv(),
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(GitError);
+    expect((err as GitError).exitCode).toBe(1);
+  });
+});
+
 describe('runGit timeout', () => {
   let dir: string;
 

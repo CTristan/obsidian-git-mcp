@@ -20,15 +20,17 @@ export class GitError extends Error {
 
   readonly args: string[];
   readonly stderr: string;
+  readonly exitCode: number | undefined;
 
   // Redaction lives in the constructor, not at the throw site, so every surface a
   // consumer might log — message, args, stderr — is covered no matter who constructs
   // the error. GitError is re-exported from the package root and its message can reach
   // MCP tool responses, which makes an unredacted token a disclosure, not a debug aid.
-  constructor(message: string, args: string[], stderr: string) {
+  constructor(message: string, args: string[], stderr: string, exitCode?: number) {
     super(redact(message));
     this.args = args.map(redact);
     this.stderr = redact(stderr);
+    this.exitCode = exitCode;
   }
 }
 
@@ -243,6 +245,11 @@ export async function runGit(
         : e.killed
           ? `timed out after ${options.timeoutMs ?? 30_000}ms${e.signal ? ` (${e.signal})` : ''}`
           : e.stderr?.trim() || e.message || 'unknown error';
-    throw new GitError(`git ${args.join(' ')} failed: ${detail}`, args, e.stderr ?? '');
+    throw new GitError(
+      `git ${args.join(' ')} failed: ${detail}`,
+      args,
+      e.stderr ?? '',
+      typeof e.code === 'number' ? e.code : undefined,
+    );
   }
 }

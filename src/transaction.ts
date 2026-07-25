@@ -528,15 +528,14 @@ export class Transactor {
   async refuseIgnoredPaths(relPaths: readonly string[]): Promise<void> {
     const candidates = [...new Set(relPaths)].filter((relPath) => relPath !== '');
     if (candidates.length === 0) return;
-    const ignored: string[] = [];
-    for (const relPath of candidates) {
-      try {
-        await this.git(['check-ignore', '-q', '--', relPath]);
-        ignored.push(relPath);
-      } catch (err) {
-        // check-ignore exits 1 with no stderr when this path is not ignored.
-        if (!(err instanceof GitError) || err.stderr !== '') throw err;
-      }
+    let ignored: string[];
+    try {
+      const out = await this.git(['check-ignore', '--', ...candidates]);
+      ignored = out.split(/\r?\n/).filter((relPath) => relPath !== '');
+    } catch (err) {
+      // check-ignore exits 1 with no stderr when none of the candidate paths are ignored.
+      if (!(err instanceof GitError) || err.exitCode !== 1 || err.stderr !== '') throw err;
+      return;
     }
     if (ignored.length > 0) {
       throw new HiddenIgnoredWriteError(
