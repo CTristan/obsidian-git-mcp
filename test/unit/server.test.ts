@@ -103,11 +103,11 @@ describe('MCPVault tool argument surface', () => {
     // server over an InMemoryTransport pair (exactly how src/server.ts wires it) and read
     // the schemas it actually serves, so the pin can never drift from what ships.
     const dir = await mkdtemp(join(tmpdir(), 'ogm-arg-drift-'));
+    const inner = createMcpVaultServer(dir, { name: 'arg-drift-probe', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'arg-drift-probe-client', version: '0.0.0' });
     try {
-      const inner = createMcpVaultServer(dir, { name: 'arg-drift-probe', version: '0.0.0' });
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await inner.connect(serverTransport);
-      const client = new Client({ name: 'arg-drift-probe-client', version: '0.0.0' });
       await client.connect(clientTransport);
 
       const { tools } = await client.listTools();
@@ -117,10 +117,9 @@ describe('MCPVault tool argument surface', () => {
           Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}).sort(),
         ]),
       );
-      await client.close();
-
       expect(actual).toEqual(MCPVAULT_TOOL_ARGS);
     } finally {
+      await Promise.allSettled([client.close(), inner.close()]);
       await rm(dir, { recursive: true, force: true });
     }
   });

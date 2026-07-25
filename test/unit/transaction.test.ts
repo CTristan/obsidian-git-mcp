@@ -309,6 +309,9 @@ describe('Transactor clearDeadLock TOCTOU', () => {
 
       // The lock records this live process's complete pid, never a torn prefix.
       expect(await fsPromises.readFile(lockPath, 'utf8')).toContain(`pid ${process.pid}`);
+      // Atomic publication writes a private staging path, never lockPath through the
+      // old open-plus-write seam this mock would corrupt.
+      expect(vi.mocked(fsPromises.open).mock.calls.some(([path]) => path === lockPath)).toBe(false);
 
       // A concurrent reclaimer sees a live holder and refuses, leaving the lock in place.
       const err: unknown = await makeTransactor(fx)['clearDeadLock']().catch((e: unknown) => e);
@@ -543,6 +546,40 @@ describe('Transactor ignored-file change signal', () => {
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
     expect(await fsPromises.readFile(trackedPath, 'utf8')).toBe(trackedBefore);
     expect(existsSync(ignoredPath)).toBe(false);
+    expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+  });
+
+  it('refuses the whole transaction when tracked and already-ignored files change together', async () => {
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+    await git(['fetch', 'origin', 'main'], fx.serverDir);
+    await git(['merge', '--ff-only', 'origin/main'], fx.serverDir);
+
+    const ignoredDir = join(fx.serverDir, 'private');
+    const ignoredPath = join(ignoredDir, 'notes.md');
+    await mkdir(ignoredDir, { recursive: true });
+    await writeFile(ignoredPath, '# Private\n\noriginal\n');
+
+    const transactor = makeTransactor(fx);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    const preRemote = await git(['rev-parse', 'main'], fx.bareDir);
+    const trackedPath = join(fx.serverDir, 'Inbox', 'Beta.md');
+    const trackedBefore = await fsPromises.readFile(trackedPath, 'utf8');
+
+    const err: unknown = await transactor
+      .transact('tracked and already-ignored edits', async () => {
+        await writeFile(trackedPath, '# Beta\n\nmutated body\n');
+        await writeFile(ignoredPath, '# Private\n\nmutated\n');
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HiddenIgnoredWriteError);
+    expect((err as Error).message.toLowerCase()).toContain('gitignore');
+    expect(await git(['rev-parse', 'main'], fx.bareDir)).toBe(preRemote);
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    expect(await fsPromises.readFile(trackedPath, 'utf8')).toBe(trackedBefore);
+    // Existing ignored bytes remain outside git's rollback surface; #11 tracks the
+    // separate snapshot-or-refusal design needed to restore them.
+    expect(await fsPromises.readFile(ignoredPath, 'utf8')).toBe('# Private\n\nmutated\n');
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });
 

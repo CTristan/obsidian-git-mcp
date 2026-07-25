@@ -550,8 +550,12 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       let real: string;
       try {
         real = await realpath(absPath);
-      } catch {
-        throw new InnerToolError(`${path}: note not found`);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          throw new InnerToolError(`${path}: note not found`);
+        }
+        throw new InnerToolError(`${path}: cannot resolve note (${code ?? 'unknown error'})`);
       }
       const reason = containmentReason(realVaultPath, real);
       if (reason) {

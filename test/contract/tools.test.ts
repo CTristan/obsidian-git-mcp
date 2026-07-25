@@ -98,6 +98,27 @@ describe('wrapper-added tools', () => {
     expect(text.indexOf('Inbox/Newest.md')).toBeLessThan(text.indexOf('Seed vault'));
   });
 
+  it('list_recent_changes scopes history to a contained path and rejects traversal', async () => {
+    await callTool(srv.client, 'write_note', {
+      path: 'Inbox/Scoped.md',
+      content: '# Scoped\n',
+    });
+    const scoped = await callTool(srv.client, 'list_recent_changes', {
+      path: 'Inbox/Scoped.md',
+      limit: 10,
+    });
+    expect(scoped.isError, `expected success, got: ${textOf(scoped)}`).toBeFalsy();
+    expect(textOf(scoped)).toContain('Inbox/Scoped.md');
+    expect(textOf(scoped)).not.toContain('Seed vault');
+
+    const traversal = await callTool(srv.client, 'list_recent_changes', {
+      path: '../outside',
+      limit: 10,
+    });
+    expect(traversal.isError).toBe(true);
+    expect(textOf(traversal).toLowerCase()).toContain('traversal');
+  });
+
   it('list_recent_changes truncates a fractional limit instead of erroring', async () => {
     await callTool(srv.client, 'write_note', { path: 'Inbox/A.md', content: '# A\n' });
     await callTool(srv.client, 'write_note', { path: 'Inbox/B.md', content: '# B\n' });

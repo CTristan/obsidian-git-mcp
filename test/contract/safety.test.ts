@@ -339,10 +339,12 @@ describe('transaction safety', () => {
     });
 
     const postContent = await readFile(ignoredPath, 'utf8');
-    // The one outcome that must never happen: reporting success against an unchanged
-    // HEAD while the mutation actually landed on disk, unvalidated and uncommitted.
-    const hiddenSuccess = !res.isError && commitShaOf(res) === preHead && postContent !== original;
-    expect(hiddenSuccess).toBe(false);
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('gitignore');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+    // Restoring pre-existing ignored bytes needs the separate snapshot/refusal design
+    // tracked by #11; this guard proves the mutation cannot masquerade as a committed write.
+    expect(postContent).toBe('# Secret\n\nmutated\n');
   });
 
   it('a write that only creates a newly-gitignored file is refused, not left on disk', async () => {

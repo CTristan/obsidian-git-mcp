@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -47,7 +47,21 @@ export interface GitOptions {
 // backslashes would read as escape sequences. Wiping global/system config wholesale isn't an
 // option — that would drop the user's credential.helper and break authenticated pushes.
 const EMPTY_HOOKS_DIR = mkdtempSync(join(tmpdir(), 'ogm-nohooks-')).replaceAll('\\', '/');
-const DISABLE_HOOKS = ['-c', `core.hooksPath=${EMPTY_HOOKS_DIR}`];
+const EMPTY_ATTRIBUTES_FILE = `${EMPTY_HOOKS_DIR}/attributes`;
+writeFileSync(EMPTY_ATTRIBUTES_FILE, '');
+const HARDENED_CONFIG = [
+  '--no-pager',
+  '-c',
+  `core.hooksPath=${EMPTY_HOOKS_DIR}`,
+  '-c',
+  `core.attributesFile=${EMPTY_ATTRIBUTES_FILE}`,
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'diff.external=',
+  '-c',
+  'protocol.ext.allow=never',
+];
 
 // The 'exit' handler must be synchronous — Node discards queued async work once teardown
 // begins — so cleanup is rmSync, not rm. It stays best-effort because 'exit' never fires on
@@ -70,10 +84,17 @@ export async function runGit(
   options: GitOptions = {},
 ): Promise<string> {
   try {
-    const { stdout } = await exec('git', [...DISABLE_HOOKS, ...args], {
+    const { stdout } = await exec('git', [...HARDENED_CONFIG, ...args], {
       cwd,
-      // GIT_TERMINAL_PROMPT last so no caller can re-enable interactive prompts.
-      env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: '0' },
+      // These forced values come last so no caller can re-enable interactive prompts or
+      // system-level attributes that select host-configured filter/textconv commands.
+      env: {
+        ...process.env,
+        ...options.env,
+        GIT_ATTR_NOSYSTEM: '1',
+        GIT_EXTERNAL_DIFF: '',
+        GIT_TERMINAL_PROMPT: '0',
+      },
       timeout: options.timeoutMs ?? 30_000,
       maxBuffer: 16 * 1024 * 1024,
     });

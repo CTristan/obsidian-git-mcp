@@ -633,16 +633,16 @@ export class Transactor {
           );
         }
 
+        if ((await this.ignoredFingerprint(ignoredBefore)) !== ignoredBeforeFingerprint) {
+          // git can neither stage nor commit an already-ignored path, so refuse the whole
+          // mutation even when tracked changes accompany it; committing those would report
+          // partial success while silently dropping the ignored half.
+          throw new HiddenIgnoredWriteError(
+            'the mutation touched an already-gitignored path, which git cannot stage or ' +
+              'commit; refusing to report success for an untracked write',
+          );
+        }
         if (changed.length === 0) {
-          if ((await this.ignoredFingerprint(ignoredBefore)) !== ignoredBeforeFingerprint) {
-            // git can neither stage nor commit an already-ignored path, so there is no
-            // safe way to land this edit — only to refuse it and say so, instead of
-            // reporting the untouched HEAD as a successful write.
-            throw new HiddenIgnoredWriteError(
-              'the mutation only touched an already-gitignored path, which git cannot ' +
-                'stage or commit; refusing to report success for an untracked write',
-            );
-          }
           return { sha: rollbackTo, result };
         }
         for (const relPath of changed) {

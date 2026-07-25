@@ -11,6 +11,7 @@ import {
   realpath,
   rm,
   symlink,
+  unlink,
   writeFile,
   type FileHandle,
 } from 'node:fs/promises';
@@ -70,6 +71,34 @@ describe('applyCloneDiff symlink safety', () => {
     // Nothing was created at the external target.
     expect(existsSync(join(outside, 'new.md'))).toBe(false);
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('refuses a clone source swapped to a symlink after the manifest scan', async () => {
+    const target = join(vaultPath, 'note.md');
+    const source = join(cloneDir, 'note.md');
+    const outsideFile = join(outside, 'secret.md');
+    await writeFile(target, 'original\n');
+    await writeFile(source, 'staged\n');
+    await writeFile(outsideFile, 'outside secret\n');
+    const after = await manifestOf(cloneDir);
+    const actual = await vi.importActual<typeof fsPromises>('node:fs/promises');
+    const openSpy = vi.mocked(fsPromises.open);
+    openSpy.mockImplementation((async (path: string, flags: number, mode?: number) => {
+      if (path === source) {
+        await unlink(source);
+        await symlink(outsideFile, source);
+      }
+      return actual.open(path, flags, mode);
+    }) as typeof fsPromises.open);
+
+    try {
+      await expect(
+        applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, new Map(), after),
+      ).rejects.toMatchObject({ code: 'ELOOP' });
+      expect(await readFile(target, 'utf8')).toBe('original\n');
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 
   it('refuses to delete through a symlinked intermediate path', async () => {
@@ -269,12 +298,16 @@ describe('cloneWorktree failure cleanup', () => {
     // (and its finally-rm) on a successful return. Force the chmod to fail and the dir must
     // still be gone.
     await writeFile(join(vaultPath, 'readable.md'), '# ok\n');
-    vi.mocked(chmod).mockImplementationOnce(() => Promise.reject(new Error('chmod boom')));
+    const chmodSpy = vi.mocked(chmod);
+    chmodSpy.mockImplementationOnce(() => Promise.reject(new Error('chmod boom')));
+    try {
+      await expect(cloneWorktree(vaultPath)).rejects.toThrow(/chmod boom/);
 
-    await expect(cloneWorktree(vaultPath)).rejects.toThrow(/chmod boom/);
-
-    const leftovers = (await readdir(tmpRoot)).filter((n) => n.startsWith('ogm-stage-'));
-    expect(leftovers).toEqual([]);
+      const leftovers = (await readdir(tmpRoot)).filter((n) => n.startsWith('ogm-stage-'));
+      expect(leftovers).toEqual([]);
+    } finally {
+      chmodSpy.mockRestore();
+    }
   });
 });
 
@@ -302,9 +335,13 @@ describe('manifestOf nested tree', () => {
 
     const manifest = await manifestOf(root);
 
-    expect(new Set(manifest.keys())).toEqual(
-      new Set(['a.md', 'sub/b.md', 'sub/c.md', 'dirlink', 'filelink']),
-    );
+    expect([...manifest.keys()]).toEqual([
+      'a.md',
+      'dirlink',
+      'filelink',
+      'sub/b.md',
+      'sub/c.md',
+    ]);
     // Directories are traversed but never recorded, and a symlinked directory is not descended.
     expect(manifest.has('sub')).toBe(false);
     expect(manifest.has('dirlink/b.md')).toBe(false);
@@ -363,6 +400,7 @@ describe('manifestOf global lstat bound', () => {
 
     // The cap bounds concurrency, it never drops work: every file is still fingerprinted.
     expect(manifest.size).toBe(160);
+    expect(maxInFlight).toBeGreaterThan(1);
     expect(maxInFlight).toBeLessThanOrEqual(DIR_CONCURRENCY);
   });
 });
@@ -468,6 +506,34 @@ describe('openPinnedHandle path pinning', () => {
     expect(await readFile(target, 'utf8')).toBe('written through the pinned handle\n');
   });
 
+  it('refuses callers that omit O_NOFOLLOW from the open flags', async () => {
+    const target = join(root, 'note.md');
+    await writeFile(target, 'seed\n');
+    const expectedReal = await realpath(target);
+
+    await expect(
+      openPinnedHandle(
+        target,
+        target,
+        expectedReal,
+        constants.O_WRONLY,
+        (message) => new Error(message),
+      ),
+    ).rejects.toThrow(/requires O_NOFOLLOW/);
+  });
+
+  it('refuses to open when the final path segment is a symlink', async () => {
+    const real = join(root, 'real.md');
+    const link = join(root, 'link.md');
+    await writeFile(real, 'seed\n');
+    await symlink(real, link);
+
+    await expect(
+      openPinnedHandle(link, link, await realpath(link), writeFlags, (message) => new Error(message)),
+    ).rejects.toMatchObject({ code: 'ELOOP' });
+    expect(await readFile(real, 'utf8')).toBe('seed\n');
+  });
+
   it('refuses when the resolved path no longer matches the expected canonical path', async () => {
     // The realpath re-resolution guard: what we opened must still canonicalize to exactly the
     // path the caller pinned. Point expectedReal at a different real file so resolution
@@ -492,12 +558,16 @@ describe('openPinnedHandle path pinning', () => {
     await writeFile(target, 'seed\n');
     const expectedReal = await realpath(target);
 
-    vi.mocked(fsPromises.stat).mockImplementationOnce(
+    const statSpy = vi.mocked(fsPromises.stat);
+    statSpy.mockImplementationOnce(
       () => Promise.resolve({ dev: -1, ino: -1 } as unknown as Stats),
     );
-
-    await expect(
-      openPinnedHandle(target, target, expectedReal, writeFlags, (message) => new Error(message)),
-    ).rejects.toThrow(/path changed during the write/);
+    try {
+      await expect(
+        openPinnedHandle(target, target, expectedReal, writeFlags, (message) => new Error(message)),
+      ).rejects.toThrow(/path changed during the write/);
+    } finally {
+      statSpy.mockRestore();
+    }
   });
 });

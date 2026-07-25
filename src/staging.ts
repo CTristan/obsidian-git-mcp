@@ -105,7 +105,7 @@ export async function manifestOf(dir: string): Promise<Manifest> {
     // reporting DT_UNKNOWN (some network/older filesystems, never APFS/ext4) makes every
     // dirent.is*() return false without Node falling back to lstat, which would skip a real
     // directory from recursion and record a real symlink with isSymlink: false.
-    const names = await readdir(cur);
+    const names = await lstatLimit.run(() => readdir(cur));
     // Every entry's lstat (and any recursive walk it triggers) is independent of every other's,
     // so run them through mapWithConcurrency instead of awaiting one at a time — otherwise scan
     // latency scales linearly with the vault's file count.
@@ -262,6 +262,9 @@ export async function openPinnedHandle(
   flags: number,
   makeMismatchError: (message: string) => Error,
 ): Promise<FileHandle> {
+  if ((flags & constants.O_NOFOLLOW) === 0) {
+    throw new Error('openPinnedHandle requires O_NOFOLLOW');
+  }
   const handle = await open(openTarget, flags, 0o644);
   try {
     const resolved = await realpath(reResolveTarget);
@@ -309,7 +312,10 @@ async function writeIntoVault(
   try {
     // The vault handle is pinned before any bytes move; the clone read only opens after, and
     // applyCloneDiff already refused any symlink in the diff, so rel is a plain file here.
-    const source = await open(join(cloneDir, rel), constants.O_RDONLY);
+    const source = await open(
+      join(cloneDir, rel),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
     try {
       // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
       await handle.truncate(0);

@@ -129,3 +129,68 @@ describe('runGit host hook neutralization', () => {
     expect(existsSync(markerPath)).toBe(false);
   });
 });
+
+describe('runGit host execution-vector neutralization', () => {
+  let dir: string;
+  let probeDir: string;
+  let markerPath: string;
+  let probePath: string;
+  let globalConfig: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ogm-git-hardened-repo-'));
+    probeDir = await mkdtemp(join(tmpdir(), 'ogm-git-hardened-probe-'));
+    markerPath = join(probeDir, 'ran');
+    probePath = join(probeDir, 'probe');
+    globalConfig = join(probeDir, 'gitconfig');
+    await writeFile(probePath, `#!/bin/sh\necho ran > "${markerPath}"\ncat\n`);
+    await chmod(probePath, 0o755);
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n`,
+    );
+    await runGit(['init', '.'], dir, { env: isolatedGitEnv(globalConfig) });
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(probeDir, { recursive: true, force: true });
+  });
+
+  it('does not run a diff.external command inherited from host git config', async () => {
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${probePath}\n`,
+    );
+    await writeFile(join(dir, 'note.md'), 'before\n');
+    await runGit(['add', 'note.md'], dir, { env: isolatedGitEnv(globalConfig) });
+    await runGit(['commit', '-m', 'seed'], dir, { env: isolatedGitEnv(globalConfig) });
+    await writeFile(join(dir, 'note.md'), 'after\n');
+
+    await runGit(['diff'], dir, { env: isolatedGitEnv(globalConfig) }).catch(() => {});
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('does not run a filter command selected by host attributes and config', async () => {
+    const attributesPath = join(probeDir, 'attributes');
+    await writeFile(attributesPath, '*.md filter=probe\n');
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[core]\n\tattributesFile = ${attributesPath}\n[filter "probe"]\n\tclean = ${probePath}\n`,
+    );
+    await writeFile(join(dir, 'note.md'), 'body\n');
+
+    await runGit(['add', 'note.md'], dir, { env: isolatedGitEnv(globalConfig) });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('does not run an explicitly supplied ext transport command', async () => {
+    await runGit(['ls-remote', `ext::${probePath}`], dir, {
+      env: isolatedGitEnv(globalConfig),
+    }).catch(() => {});
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+});
