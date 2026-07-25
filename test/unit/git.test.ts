@@ -228,6 +228,44 @@ describe('runGit host execution-vector neutralization', () => {
     expect(existsSync(markerPath)).toBe(false);
   });
 
+  it.each(['sshCommand', 'gitProxy'])(
+    'refuses execution-capable core.%s config instead of running it',
+    async (key) => {
+      await writeFile(
+        globalConfig,
+        `[user]\n\tname = Probe\n\temail = probe@test.local\n[core]\n\t${key} = ${shellCommandPath(probePath)}\n`,
+      );
+
+      const err: unknown = await runGit(['status', '--porcelain'], dir, {
+        env: isolatedGitEnv(globalConfig),
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(GitError);
+      expect((err as Error).message.toLowerCase()).toContain(`core.${key.toLowerCase()}`);
+      expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
+  it('preserves option-like pathspecs after the -- separator', async () => {
+    await writeFile(join(dir, '--ext-diff'), 'before\n');
+    await writeFile(join(dir, 'other.md'), 'before\n');
+    await runGit(['add', '--', '--ext-diff', 'other.md'], dir, {
+      env: isolatedGitEnv(globalConfig),
+    });
+    await runGit(['commit', '-m', 'seed option-like path'], dir, {
+      env: isolatedGitEnv(globalConfig),
+    });
+    await writeFile(join(dir, '--ext-diff'), 'after\n');
+    await writeFile(join(dir, 'other.md'), 'after\n');
+
+    const diff = await runGit(['diff', '--', '--ext-diff'], dir, {
+      env: isolatedGitEnv(globalConfig),
+    });
+
+    expect(diff).toContain('--ext-diff');
+    expect(diff).not.toContain('other.md');
+  });
+
   it('re-reads execution config after an explicit transaction-boundary invalidation', async () => {
     const cache = createGitExecutionCache();
     await runGit(['status', '--porcelain'], dir, {
@@ -371,10 +409,27 @@ describe('runGit host execution-vector neutralization', () => {
   });
 
   it('does not run an explicitly supplied ext transport command', async () => {
-    await runGit(['ls-remote', `ext::${shellCommandPath(probePath)}`], dir, {
+    await runGit(['ls-remote', `ext::${gitConfigPath(probePath)}`], dir, {
       env: isolatedGitEnv(globalConfig),
     }).catch(() => {});
 
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('rejects a leading protected -c override before it can enable an ext transport', async () => {
+    const err: unknown = await runGit(
+      [
+        '-c',
+        'protocol.ext.allow=always',
+        'ls-remote',
+        `ext::${gitConfigPath(probePath)}`,
+      ],
+      dir,
+      { env: isolatedGitEnv(globalConfig) },
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(GitError);
+    expect((err as Error).message).toContain('protocol.ext.allow');
     expect(existsSync(markerPath)).toBe(false);
   });
 

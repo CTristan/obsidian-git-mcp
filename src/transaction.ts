@@ -59,7 +59,7 @@ export interface TransactorConfig {
   refuseExecutableNote: (relPath: string) => Promise<void>;
   /** Test seam: runs before every push attempt. */
   beforePush?: (() => Promise<void>) | undefined;
-  /** Test seam: runs after every git invocation resolves, before its result returns. */
+  /** Test seam: runs after every git invocation settles, before its result or error returns. */
   onGitCall?: ((args: readonly string[]) => void | Promise<void>) | undefined;
 }
 
@@ -185,12 +185,14 @@ export class Transactor {
   }
 
   private async git(args: string[], options?: GitOptions): Promise<string> {
-    const result = await runGit(args, this.cfg.vaultPath, {
-      ...options,
-      executionCache: this.gitExecutionCache,
-    });
-    await this.cfg.onGitCall?.(args);
-    return result;
+    try {
+      return await runGit(args, this.cfg.vaultPath, {
+        ...options,
+        executionCache: this.gitExecutionCache,
+      });
+    } finally {
+      await this.cfg.onGitCall?.(args);
+    }
   }
 
   private invalidateGitExecutionConfig(): void {

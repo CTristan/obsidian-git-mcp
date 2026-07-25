@@ -327,6 +327,8 @@ describe('cloneWorktree failure cleanup', () => {
   let tmpRoot: string;
   let vaultPath: string;
   let savedTmpdir: string | undefined;
+  let savedTemp: string | undefined;
+  let savedTmp: string | undefined;
 
   beforeEach(async () => {
     // Redirect os.tmpdir() at the source (cloneWorktree hard-codes tmpdir()) so the only
@@ -334,7 +336,11 @@ describe('cloneWorktree failure cleanup', () => {
     // the whole dir and prove no stage leaked.
     tmpRoot = await mkdtemp(join(tmpdir(), 'ogm-clone-cleanup-'));
     savedTmpdir = process.env.TMPDIR;
+    savedTemp = process.env.TEMP;
+    savedTmp = process.env.TMP;
     process.env.TMPDIR = tmpRoot;
+    process.env.TEMP = tmpRoot;
+    process.env.TMP = tmpRoot;
     vaultPath = join(tmpRoot, 'vault');
     await mkdir(vaultPath);
   });
@@ -342,6 +348,10 @@ describe('cloneWorktree failure cleanup', () => {
   afterEach(async () => {
     if (savedTmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = savedTmpdir;
+    if (savedTemp === undefined) delete process.env.TEMP;
+    else process.env.TEMP = savedTemp;
+    if (savedTmp === undefined) delete process.env.TMP;
+    else process.env.TMP = savedTmp;
     await rm(tmpRoot, { recursive: true, force: true });
   });
 

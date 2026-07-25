@@ -87,6 +87,9 @@ function fenceMask(
  */
 export function appendToSection(content: string, heading: string, text: string): string {
   const wanted = heading.trim();
+  if (text === '') {
+    throw new Error('text must be non-empty');
+  }
   if (
     wanted === '' ||
     /[\r\n]/.test(wanted) ||

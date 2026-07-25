@@ -1,11 +1,11 @@
-import { symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, symlink } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { expect } from 'vitest';
 import { createVaultServer, type VaultServerConfig } from '../src/index.js';
-import { git, type Fixture } from './fixture.js';
+import { git, resolveFixturePath, type Fixture } from './fixture.js';
 
 export interface TestServer {
   client: Client;
@@ -126,7 +126,10 @@ export async function commitSymlink(
   target: string,
   message: string,
 ): Promise<void> {
-  await symlink(target, join(fx.collabDir, linkName));
+  await git(['pull', '--rebase', 'origin', 'main'], fx.collabDir);
+  const linkPath = await resolveFixturePath(fx.collabDir, linkName);
+  await mkdir(dirname(linkPath), { recursive: true });
+  await symlink(target, linkPath);
   await git(['add', '-A'], fx.collabDir);
   await git(['commit', '-m', message], fx.collabDir);
   await git(['push', 'origin', 'main'], fx.collabDir);
@@ -138,8 +141,11 @@ export async function commitSymlinkChain(
   links: ReadonlyArray<readonly [linkName: string, target: string]>,
   message: string,
 ): Promise<void> {
+  await git(['pull', '--rebase', 'origin', 'main'], fx.collabDir);
   for (const [linkName, target] of links) {
-    await symlink(target, join(fx.collabDir, linkName));
+    const linkPath = await resolveFixturePath(fx.collabDir, linkName);
+    await mkdir(dirname(linkPath), { recursive: true });
+    await symlink(target, linkPath);
   }
   await git(['add', '-A'], fx.collabDir);
   await git(['commit', '-m', message], fx.collabDir);

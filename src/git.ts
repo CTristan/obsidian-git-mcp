@@ -111,7 +111,76 @@ function gitEnv(overrides: Record<string, string> | undefined): NodeJS.ProcessEn
 }
 
 const EXECUTION_CONFIG =
-  '^(diff\\.external|filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv))$';
+  '^(core\\.(sshcommand|gitproxy)|diff\\.external|filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv))$';
+const REFUSED_EXECUTION_CONFIG = new Set(['core.sshcommand', 'core.gitproxy']);
+const PROTECTED_CONFIG_KEY =
+  /^(?:protocol\.ext\.allow|core\.(?:hookspath|attributesfile|fsmonitor|sshcommand|gitproxy)|diff\.external|filter\..*\.(?:clean|smudge|process|required)|diff\..*\.(?:command|textconv))$/i;
+const GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  '-C',
+  '--exec-path',
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--super-prefix',
+]);
+
+function assertSafeConfigOverride(value: string): void {
+  const separator = value.indexOf('=');
+  const key = (separator === -1 ? value : value.slice(0, separator)).toLowerCase();
+  if (PROTECTED_CONFIG_KEY.test(key)) {
+    throw new Error(`refusing protected Git config override ${key}`);
+  }
+}
+
+function splitLeadingGlobalOptions(args: string[]): {
+  global: string[];
+  command: string | undefined;
+  remaining: string[];
+} {
+  const global: string[] = [];
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index]!;
+    if (arg === '-c') {
+      const value = args[index + 1];
+      if (value === undefined) return { global: args, command: undefined, remaining: [] };
+      assertSafeConfigOverride(value);
+      global.push(arg, value);
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith('-c') && arg.length > 2) {
+      assertSafeConfigOverride(arg.slice(2));
+      global.push(arg);
+      index++;
+      continue;
+    }
+    if (arg.startsWith('--config-env=')) {
+      assertSafeConfigOverride(arg.slice('--config-env='.length));
+      global.push(arg);
+      index++;
+      continue;
+    }
+    if (GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      const value = args[index + 1];
+      if (value === undefined) return { global: args, command: undefined, remaining: [] };
+      global.push(arg, value);
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      global.push(arg);
+      index++;
+      continue;
+    }
+    return {
+      global,
+      command: arg,
+      remaining: args.slice(index + 1),
+    };
+  }
+  return { global, command: undefined, remaining: [] };
+}
 
 async function configuredExecutionOverrides(
   cwd: string,
@@ -138,6 +207,12 @@ async function configuredExecutionOverrides(
     .filter((key) => key !== '');
   const overrides: string[] = [];
   for (const key of new Set(keys)) {
+    if (REFUSED_EXECUTION_CONFIG.has(key)) {
+      throw new Error(
+        `refusing execution-capable Git config ${key}; remove it because the server ` +
+          'will not execute configured transport commands',
+      );
+    }
     overrides.push('-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`);
   }
   return overrides;
@@ -185,20 +260,27 @@ async function cachedExecutionOverrides(
 }
 
 function hardenCommandArgs(args: string[]): string[] {
-  const command = args[0];
-  const remaining = args.slice(1).filter((arg) => arg !== '--ext-diff' && arg !== '--textconv');
+  const { global, command, remaining: rest } = splitLeadingGlobalOptions(args);
+  if (command === undefined) return args;
+  const separator = rest.indexOf('--');
+  const options = separator === -1 ? rest : rest.slice(0, separator);
+  const pathspecs = separator === -1 ? [] : rest.slice(separator);
+  const remaining = [
+    ...options.filter((arg) => arg !== '--ext-diff' && arg !== '--textconv'),
+    ...pathspecs,
+  ];
   if (
     command === 'diff' ||
     command === 'log' ||
     command === 'show' ||
     command === 'format-patch'
   ) {
-    return [command, '--no-ext-diff', '--no-textconv', ...remaining];
+    return [...global, command, '--no-ext-diff', '--no-textconv', ...remaining];
   }
   if (command === 'blame' || command === 'grep') {
-    return [command, '--no-textconv', ...remaining];
+    return [...global, command, '--no-textconv', ...remaining];
   }
-  return args;
+  return [...global, command, ...rest];
 }
 
 /**

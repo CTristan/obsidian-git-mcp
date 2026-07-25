@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -23,6 +23,39 @@ const FIXTURE_GIT_ENV = {
 export async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await exec('git', args, { cwd, env: FIXTURE_GIT_ENV });
   return stdout.trim();
+}
+
+/** Resolves a test-controlled path without allowing it to escape its throwaway root. */
+export async function resolveFixturePath(root: string, path: string): Promise<string> {
+  const resolved = resolve(root, path);
+  const rel = relative(root, resolved);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`fixture path escapes its throwaway checkout: ${JSON.stringify(path)}`);
+  }
+
+  const components = rel === '' ? [] : rel.split(sep);
+  let current = root;
+  for (let index = -1; index < components.length; index++) {
+    if (index >= 0) current = join(current, components[index]!);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw err;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        `fixture path crosses a symlink inside its throwaway checkout: ${JSON.stringify(path)}`,
+      );
+    }
+    if (index < components.length - 1 && !stat.isDirectory()) {
+      throw new Error(
+        `fixture path crosses a non-directory inside its throwaway checkout: ${JSON.stringify(path)}`,
+      );
+    }
+  }
+  return resolved;
 }
 
 // Every clone gets a local identity and local commit.gpgsign=false, because a test run
@@ -144,8 +177,9 @@ async function buildFixture(
     outsideDir,
     async collabWrite(path, content, message) {
       await git(['pull', '--rebase', 'origin', 'main'], collabDir);
-      await mkdir(join(collabDir, dirname(path)), { recursive: true });
-      await writeFile(join(collabDir, path), content);
+      const destination = await resolveFixturePath(collabDir, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, content);
       await git(['add', '-A'], collabDir);
       await git(['commit', '-m', message], collabDir);
       await git(['push', 'origin', 'main'], collabDir);

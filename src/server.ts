@@ -496,6 +496,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       // clone preserves links verbatim, so a delegated write through one resolves onto its
       // target exactly as before.
       const stage = await cloneWorktree(vaultPath);
+      let stagedWriteCompleted = false;
       try {
         const realStage = await realpath(stage);
         // Refuse an escaping symlink against the CLONE — same resolution as the live vault,
@@ -518,9 +519,17 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
           vaultPath,
           realVaultPath,
         );
+        stagedWriteCompleted = true;
         return callResult;
       } finally {
-        await rm(stage, { recursive: true, force: true });
+        try {
+          await rm(stage, { recursive: true, force: true });
+        } catch (cleanupError) {
+          // Preserve the transaction or validation failure that triggered cleanup. A
+          // cleanup failure after a successful staged write still fails the transaction,
+          // because silently leaking a clone of the vault is not a successful outcome.
+          if (stagedWriteCompleted) throw cleanupError;
+        }
       }
     });
     return { ...result, _meta: { ...(result._meta ?? {}), commitSha: sha } };

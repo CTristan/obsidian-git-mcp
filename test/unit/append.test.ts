@@ -26,6 +26,11 @@ describe('appendToSection', () => {
     expect(() => appendToSection(note, '', '- two')).toThrow(/non-empty single line/);
   });
 
+  it('rejects empty text instead of inserting a blank line', () => {
+    const note = '# T\n\n## Log\n\n- one\n';
+    expect(() => appendToSection(note, 'Log', '')).toThrow(/text must be non-empty/);
+  });
+
   it('rejects a heading with an embedded newline instead of injecting a second heading', () => {
     const note = '# T\n\n- one\n';
     expect(() => appendToSection(note, 'Foo\n## Injected', '- two')).toThrow(

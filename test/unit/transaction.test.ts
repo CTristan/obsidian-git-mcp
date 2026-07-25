@@ -170,7 +170,7 @@ describe('Transactor.reconcileAtStartup', () => {
 
       const err: unknown = await transactor.reconcileAtStartup().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(LockError);
-      expect((err as Error).message).toMatch(new RegExp(`live pid ${foreignPid}`));
+      expect((err as Error).message).toContain(`live pid ${foreignPid}`);
     } finally {
       killSpy.mockRestore();
     }
@@ -538,20 +538,19 @@ describe('Transactor ignored-file change signal', () => {
   });
 
   it('accepts an all-non-ignored candidate batch when Git reports no matches', async () => {
-    const runGitSpy = vi.mocked(gitModule.runGit);
-    runGitSpy.mockClear();
-    const transactor = makeTransactor(fx);
+    const checkIgnoreCalls: string[][] = [];
+    const transactor = makeTransactor(fx, {
+      onGitCall: (args) => {
+        if (args[0] === 'check-ignore') checkIgnoreCalls.push([...args]);
+      },
+    });
 
     await expect(
       transactor.refuseIgnoredPaths(['Inbox/Alpha.md', 'Inbox/Beta.md']),
     ).resolves.toBeUndefined();
 
-    expect(runGitSpy).toHaveBeenCalledTimes(1);
-    expect(runGitSpy.mock.calls[0]?.[0]).toEqual([
-      'check-ignore',
-      '--',
-      'Inbox/Alpha.md',
-      'Inbox/Beta.md',
+    expect(checkIgnoreCalls).toEqual([
+      ['check-ignore', '--', 'Inbox/Alpha.md', 'Inbox/Beta.md'],
     ]);
   });
 
