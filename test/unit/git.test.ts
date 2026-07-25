@@ -98,7 +98,8 @@ describe('runGit timeout', () => {
     const elapsed = Date.now() - start;
 
     expect(err).toBeInstanceOf(GitError);
-    expect(elapsed).toBeLessThan(15_000);
+    expect(elapsed).toBeLessThan(3_000);
+    expect((err as GitError).message).toMatch(/timed out/i);
   });
 });
 
@@ -181,8 +182,9 @@ describe('runGit host execution-vector neutralization', () => {
     await runGit(['commit', '-m', 'seed'], dir, { env: isolatedGitEnv(globalConfig) });
     await writeFile(join(dir, 'note.md'), 'after\n');
 
-    await runGit(['diff'], dir, { env: isolatedGitEnv(globalConfig) }).catch(() => {});
+    const diff = await runGit(['diff'], dir, { env: isolatedGitEnv(globalConfig) });
 
+    expect(diff).toContain('note.md');
     expect(existsSync(markerPath)).toBe(false);
   });
 

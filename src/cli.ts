@@ -9,9 +9,12 @@ function fail(message: string): never {
 
 const vaultPath =
   process.argv[2]?.trim() || fail('usage: obsidian-git-mcp <vault-checkout-path>');
-const collaborator =
+const rawCollaborator =
   process.env['OGM_COLLABORATOR']?.trim() ||
   fail('OGM_COLLABORATOR is required — it becomes the git author of every write');
+const collaborator =
+  rawCollaborator.replace(/[<>\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() ||
+  fail('OGM_COLLABORATOR must contain a valid git author name');
 
 // Fall back to a fixed slug when the name has no alphanumerics at all, because an
 // empty local part would make the default author email malformed.
@@ -40,7 +43,23 @@ try {
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
-    void server.close().finally(() => process.exit(0));
+    const timeout = setTimeout(() => {
+      console.error('failed to stop obsidian-git-mcp: shutdown timed out');
+      process.exit(1);
+    }, 5_000);
+    void server.close().then(
+      () => {
+        clearTimeout(timeout);
+        process.exit(0);
+      },
+      (err: unknown) => {
+        clearTimeout(timeout);
+        console.error(
+          `failed to stop obsidian-git-mcp: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      },
+    );
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

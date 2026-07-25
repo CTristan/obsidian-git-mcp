@@ -24,6 +24,10 @@ export class HiddenIgnoredWriteError extends TransactionError {
   override name = 'HiddenIgnoredWriteError';
 }
 
+export class IndeterminatePushError extends TransactionError {
+  override name = 'IndeterminatePushError';
+}
+
 export interface Identity {
   name: string;
   email: string;
@@ -139,6 +143,15 @@ function assertSafeGitName(kind: 'remote' | 'branch', value: string): void {
   }
 }
 
+function assertSafeIdentity(kind: 'collaborator' | 'service', identity: Identity): void {
+  if (identity.name === '' || /[<>\r\n]/.test(identity.name)) {
+    throw new TransactionError(`invalid ${kind} git identity name`);
+  }
+  if (identity.email === '' || /[<>\r\n]/.test(identity.email)) {
+    throw new TransactionError(`invalid ${kind} git identity email`);
+  }
+}
+
 /**
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
  * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
@@ -157,6 +170,8 @@ export class Transactor {
   constructor(private readonly cfg: TransactorConfig) {
     assertSafeGitName('remote', cfg.remote);
     assertSafeGitName('branch', cfg.branch);
+    assertSafeIdentity('collaborator', cfg.collaborator);
+    assertSafeIdentity('service', cfg.service);
     // Plain-clone assumption (no worktrees): the lock lives inside .git so it can never
     // sync to the remote or collide with a note path.
     this.lockPath = join(cfg.vaultPath, '.git', 'obsidian-git-mcp.lock');
@@ -686,7 +701,7 @@ export class Transactor {
 
         return { sha: await this.pushWithRetries(), result };
       } catch (err) {
-        if (rollbackTo !== undefined) {
+        if (rollbackTo !== undefined && !(err instanceof IndeterminatePushError)) {
           await this.git(['rebase', '--abort']).catch(() => {});
           await this.git(['reset', '--hard', rollbackTo]).catch(() => {});
           await this.git(['clean', '-fd']).catch(() => {});
@@ -721,9 +736,17 @@ export class Transactor {
         // the ACK get lost afterwards, so check reachability before treating this
         // as a failure — otherwise we'd roll back and report "nothing was changed"
         // for a write that IS on the remote, and the caller's retry would duplicate it.
-        await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
-          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-        });
+        try {
+          await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
+            timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+          });
+        } catch (fetchErr) {
+          throw new IndeterminatePushError(
+            'the push failed and the remote could not be re-read, so whether the commit ' +
+              'landed is unknown; do not retry blindly — re-read the vault first: ' +
+              `push error: ${(err as Error).message}; fetch error: ${(fetchErr as Error).message}`,
+          );
+        }
         this.lastFetchAt = Date.now();
         const landed = await this.git([
           'merge-base',

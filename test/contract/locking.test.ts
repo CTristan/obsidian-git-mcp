@@ -2,7 +2,14 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
-import { callTool, commitShaOf, startServer, textOf, type TestServer } from '../helpers.js';
+import {
+  callTool,
+  commitShaOf,
+  expectCleanCheckout,
+  startServer,
+  textOf,
+  type TestServer,
+} from '../helpers.js';
 
 describe('locking', () => {
   let fx: Fixture;
@@ -44,6 +51,7 @@ describe('locking', () => {
     });
     expect(blocked.isError).toBe(true);
     expect(textOf(blocked).toLowerCase()).toContain('lock');
+    await expectCleanCheckout(fx);
 
     await rm(lockPath);
     const ok = await callTool(srv.client, 'write_note', {

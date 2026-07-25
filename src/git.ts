@@ -63,8 +63,6 @@ function hardenedConfig(): string[] {
     '-c',
     'core.fsmonitor=false',
     '-c',
-    'diff.external=',
-    '-c',
     'protocol.ext.allow=never',
   ];
   hardeningState = { dir, args };
@@ -88,7 +86,6 @@ function gitEnv(overrides: Record<string, string> | undefined): NodeJS.ProcessEn
     ...env,
     ...overrides,
     GIT_ATTR_NOSYSTEM: '1',
-    GIT_EXTERNAL_DIFF: '',
     GIT_TERMINAL_PROMPT: '0',
   };
 }
@@ -126,6 +123,13 @@ async function configuredExecutionOverrides(
   return overrides;
 }
 
+function hardenCommandArgs(args: string[]): string[] {
+  if (args[0] === 'diff' || args[0] === 'log' || args[0] === 'show') {
+    return [args[0], '--no-ext-diff', '--no-textconv', ...args.slice(1)];
+  }
+  return args;
+}
+
 /**
  * Run a git command via execFile with an argument array — never a shell string — so
  * note paths and commit messages can't inject anything. GIT_TERMINAL_PROMPT=0 because
@@ -140,16 +144,27 @@ export async function runGit(
     const base = hardenedConfig();
     const env = gitEnv(options.env);
     const executionOverrides = await configuredExecutionOverrides(cwd, env, base);
-    const { stdout } = await exec('git', [...base, ...executionOverrides, ...args], {
-      cwd,
-      env,
-      timeout: options.timeoutMs ?? 30_000,
-      maxBuffer: 16 * 1024 * 1024,
-    });
+    const { stdout } = await exec(
+      'git',
+      [...base, ...executionOverrides, ...hardenCommandArgs(args)],
+      {
+        cwd,
+        env,
+        timeout: options.timeoutMs ?? 30_000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
     return stdout.replace(/\n$/, '');
   } catch (err) {
-    const e = err as { stderr?: string; message?: string };
-    const detail = e.stderr?.trim() || e.message || 'unknown error';
+    const e = err as {
+      stderr?: string;
+      message?: string;
+      killed?: boolean;
+      signal?: string;
+    };
+    const detail = e.killed
+      ? `timed out after ${options.timeoutMs ?? 30_000}ms${e.signal ? ` (${e.signal})` : ''}`
+      : e.stderr?.trim() || e.message || 'unknown error';
     throw new GitError(`git ${args.join(' ')} failed: ${detail}`, args, e.stderr ?? '');
   }
 }

@@ -299,14 +299,18 @@ async function resolveSymlinkDestination(
   argPath: string,
 ): Promise<string | undefined> {
   let candidate = resolve(vaultPath, argPath);
-  for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+  for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
     const realParent = await realpathNearestAncestor(dirname(candidate));
     const target = join(realParent, basename(candidate));
     let link: string;
     try {
       link = await readlink(target);
-    } catch {
-      return target; // not a symlink, or nothing there yet — final destination
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EINVAL' || code === 'ENOENT' || code === 'ENOTDIR') {
+        return target; // not a symlink, or nothing there yet — final destination
+      }
+      throw err;
     }
     candidate = resolve(realParent, link);
   }
@@ -410,9 +414,14 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   // pair, so the wrapper treats it as a black box and upgrades stay cheap.
   const inner = createMcpVaultServer(vaultPath, { name: 'mcpvault-inner', version: VERSION });
   const [innerClientTransport, innerServerTransport] = InMemoryTransport.createLinkedPair();
-  await inner.connect(innerServerTransport);
   const innerClient = new Client({ name: 'obsidian-git-mcp-proxy', version: VERSION });
-  await innerClient.connect(innerClientTransport);
+  try {
+    await inner.connect(innerServerTransport);
+    await innerClient.connect(innerClientTransport);
+  } catch (err) {
+    await Promise.allSettled([innerClient.close(), inner.close()]);
+    throw err;
+  }
 
   const callInner = async (
     name: string,
@@ -597,11 +606,13 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     // Only classified tools are listed, so discovery always matches what's callable —
     // an unclassified tool from a future MCPVault upgrade stays hidden instead of being
     // listed and then refused on every call.
+    const wrapperToolNames = new Set(WRAPPER_TOOLS.map((tool) => tool.name));
     const visible = tools.filter(
       (t) =>
-        READ_TOOLS.has(t.name) ||
-        WRITE_TOOLS.has(t.name) ||
-        (allowDestructive && DESTRUCTIVE_TOOLS.has(t.name)),
+        !wrapperToolNames.has(t.name) &&
+        (READ_TOOLS.has(t.name) ||
+          WRITE_TOOLS.has(t.name) ||
+          (allowDestructive && DESTRUCTIVE_TOOLS.has(t.name))),
     );
     return { tools: [...visible, ...WRAPPER_TOOLS] };
   });

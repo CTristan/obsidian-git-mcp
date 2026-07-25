@@ -7,6 +7,7 @@ import { createFixture, git, type Fixture } from '../fixture.js';
 import * as gitModule from '../../src/git.js';
 import {
   HiddenIgnoredWriteError,
+  IndeterminatePushError,
   LockError,
   Transactor,
   TransactionError,
@@ -748,6 +749,37 @@ describe('Transactor network-operation timeouts', () => {
     }
     for (const [, , options] of localCalls) {
       expect(options?.timeoutMs).toBeUndefined();
+    }
+  });
+
+  it('preserves the local commit when both push and verification fetch fail', async () => {
+    const actual = await vi.importActual<typeof gitModule>('../../src/git.js');
+    const runGitSpy = vi.mocked(gitModule.runGit);
+    let pushFailed = false;
+    runGitSpy.mockImplementation(async (args, cwd, options) => {
+      if (args[0] === 'push') {
+        pushFailed = true;
+        throw new Error('push connection lost');
+      }
+      if (pushFailed && args[0] === 'fetch') {
+        throw new Error('verification fetch unavailable');
+      }
+      return actual.runGit(args, cwd, options);
+    });
+
+    try {
+      const err: unknown = await makeTransactor(fx)
+        .transact('an indeterminate push', async () => {
+          await writeFile(join(fx.serverDir, 'Inbox', 'Maybe.md'), '# Maybe\n');
+        })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(IndeterminatePushError);
+      expect((err as Error).message).toContain('whether the commit landed is unknown');
+      expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
+      expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('1');
+    } finally {
+      runGitSpy.mockRestore();
     }
   });
 });

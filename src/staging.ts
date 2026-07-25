@@ -79,7 +79,7 @@ export async function cloneWorktree(vaultPath: string): Promise<string> {
     // The caller only binds `stage` (and its finally-rm) on a successful return, so a throw
     // here would orphan the 0700 dir holding partial vault content. Clean up before rethrowing
     // so the contract is "returns a cleanable dir, or leaves nothing behind."
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
   return dir;
@@ -221,14 +221,16 @@ async function mkdirNoFollow(vaultPath: string, rel: string): Promise<void> {
   for (const segment of dirname(rel).split('/')) {
     if (segment === '' || segment === '.') continue;
     cur = join(cur, segment);
+    let st;
     try {
-      const st = await lstat(cur);
-      if (!st.isDirectory()) {
-        throw new Error(`${rel}: refusing to write through a non-directory at ${segment}`);
-      }
+      st = await lstat(cur);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       await mkdir(cur, { mode: 0o755 });
+      continue;
+    }
+    if (!st.isDirectory()) {
+      throw new Error(`${rel}: refusing to write through a non-directory at ${segment}`);
     }
   }
 }

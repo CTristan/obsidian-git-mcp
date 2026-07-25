@@ -6,6 +6,7 @@ export {
   ConflictError,
   DirtyCheckoutError,
   HiddenIgnoredWriteError,
+  IndeterminatePushError,
   LockError,
   TransactionError,
   Transactor,

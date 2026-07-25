@@ -109,14 +109,14 @@ export async function expectRolledBack(fx: Fixture, preRemote: string, preHead: 
 
 /**
  * A refused write must leave no trace in the checkout: nothing staged or dirty, and no
- * committed-but-unpushed local commit. We count unpushed commits against origin/main rather
+ * committed-but-unpushed local commit. We count unpushed commits against the configured upstream rather
  * than a pre-call HEAD snapshot because the transaction fast-forwards HEAD to the remote
  * before it can reject a write, so a snapshot HEAD would differ for a reason unrelated to
  * the stray-commit bug this guards.
  */
 export async function expectCleanCheckout(fx: Fixture): Promise<void> {
   expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
-  expect(await git(['rev-list', '--count', 'origin/main..HEAD'], fx.serverDir)).toBe('0');
+  expect(await git(['rev-list', '--count', '@{upstream}..HEAD'], fx.serverDir)).toBe('0');
 }
 
 /** Commits a symlink from the collaborator clone and pushes it to the remote. */
