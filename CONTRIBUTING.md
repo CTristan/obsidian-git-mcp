@@ -2,7 +2,9 @@
 
 ## Setup
 
-You need Node ≥ 24, pnpm, and git on `PATH` (the transaction wrapper shells out to the system `git`).
+You need Node ≥ 24, pnpm, and git ≥ 2.32 on `PATH`. The transaction wrapper shells out to the system `git`, and the test fixtures isolate themselves from your host git config through `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, which older git silently ignores — a leak that would let a global hook, alias, or signing setting change test behavior.
+
+pnpm doesn't ship with Node, so enable it via Corepack first — the README's [Installing](README.md#installing) section has the bootstrap, including the `corepack@latest` caveat, and pointing there instead of repeating it keeps the two copies from drifting.
 
 ```sh
 pnpm install
