@@ -9,6 +9,7 @@ import {
   HiddenIgnoredWriteError,
   LockError,
   Transactor,
+  TransactionError,
   type TransactorConfig,
 } from '../../src/transaction.js';
 
@@ -118,6 +119,34 @@ describe('Transactor.reconcileAtStartup', () => {
     expect(lockPresentDuring.every((present) => present)).toBe(true);
     // The lock is released once reconcile finishes, or every later write would deadlock.
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('refuses to reconcile a checkout on a different branch', async () => {
+    await git(['checkout', '-b', 'other'], fx.serverDir);
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+
+    const err: unknown = await makeTransactor(fx).reconcileAtStartup().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(TransactionError);
+    expect((err as Error).message).toContain("checkout is on 'other'");
+    expect(await git(['branch', '--show-current'], fx.serverDir)).toBe('other');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
+  it('refuses to reconcile a detached HEAD', async () => {
+    const preHead = await git(['rev-parse', 'HEAD'], fx.serverDir);
+    await git(['checkout', '--detach', preHead], fx.serverDir);
+
+    const err: unknown = await makeTransactor(fx).reconcileAtStartup().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(TransactionError);
+    expect((err as Error).message).toContain('detached HEAD');
+    expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
+  });
+
+  it('rejects option-like remote and branch configuration', () => {
+    expect(() => makeTransactor(fx, { remote: '--upload-pack=probe' })).toThrow(TransactionError);
+    expect(() => makeTransactor(fx, { branch: '-probe' })).toThrow(TransactionError);
   });
 
   it('treats EPERM from process.kill as a live lock holder, not a dead one', async () => {
@@ -655,6 +684,27 @@ describe('Transactor.transact return shape', () => {
 
     expect(sha).toBe(preHead);
     expect(result).toBe('no changes');
+  });
+});
+
+describe('Transactor.recentChanges input normalization', () => {
+  let fx: Fixture;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+  });
+
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it('clamps non-positive and non-finite limits to one commit', async () => {
+    const transactor = makeTransactor(fx);
+    for (const limit of [0, -10, Number.NaN]) {
+      const lines = (await transactor.recentChanges(limit)).trim().split('\n');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('Seed vault');
+    }
   });
 });
 

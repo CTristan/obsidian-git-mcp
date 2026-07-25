@@ -122,6 +122,23 @@ function parseLockPid(contents: string): number | undefined {
   return Number.isNaN(pid) || pid <= 0 ? undefined : pid;
 }
 
+function assertSafeGitName(kind: 'remote' | 'branch', value: string): void {
+  const unsafe =
+    value === '' ||
+    value.startsWith('-') ||
+    value.startsWith('.') ||
+    value.endsWith('.') ||
+    value.endsWith('/') ||
+    value.includes('..') ||
+    value.includes('//') ||
+    value.includes('@{') ||
+    /[\x00-\x20\x7f~^:?*[\]\\]/.test(value) ||
+    value.split('/').some((segment) => segment.endsWith('.lock'));
+  if (unsafe) {
+    throw new TransactionError(`invalid git ${kind} name: ${JSON.stringify(value)}`);
+  }
+}
+
 /**
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
  * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
@@ -138,6 +155,8 @@ export class Transactor {
   private validatedThroughSha: string | undefined;
 
   constructor(private readonly cfg: TransactorConfig) {
+    assertSafeGitName('remote', cfg.remote);
+    assertSafeGitName('branch', cfg.branch);
     // Plain-clone assumption (no worktrees): the lock lives inside .git so it can never
     // sync to the remote or collide with a note path.
     this.lockPath = join(cfg.vaultPath, '.git', 'obsidian-git-mcp.lock');
@@ -503,7 +522,16 @@ export class Transactor {
     // unlinks the lockfile, because that would unlink a live peer's lock.
     await this.acquireLockClearingStale();
     try {
-      await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+      const current = await this.git(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(
+        () => '',
+      );
+      if (current !== this.cfg.branch) {
+        throw new TransactionError(
+          `the checkout is on '${current || 'a detached HEAD'}' but the server is configured ` +
+            `for branch '${this.cfg.branch}'; refusing to start`,
+        );
+      }
+      await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
         timeoutMs: NETWORK_GIT_TIMEOUT_MS,
       });
       this.lastFetchAt = Date.now();
@@ -550,7 +578,7 @@ export class Transactor {
           // failing them (writes stay strict — their own fetch is unguarded). The
           // timestamp advances even on failure so an outage doesn't stall every read
           // behind a fetch timeout.
-          await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+          await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
             timeoutMs: NETWORK_GIT_TIMEOUT_MS,
           }).catch(() => {});
           this.lastFetchAt = Date.now();
@@ -590,7 +618,7 @@ export class Transactor {
             'the checkout is dirty; refusing to write (restart the server to reconcile)',
           );
         }
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+        await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
           timeoutMs: NETWORK_GIT_TIMEOUT_MS,
         });
         this.lastFetchAt = Date.now();
@@ -684,7 +712,7 @@ export class Transactor {
     for (let attempt = 0; ; attempt++) {
       await this.cfg.beforePush?.();
       try {
-        await this.git(['push', this.cfg.remote, `HEAD:${this.cfg.branch}`], {
+        await this.git(['push', '--', this.cfg.remote, `HEAD:${this.cfg.branch}`], {
           timeoutMs: NETWORK_GIT_TIMEOUT_MS,
         });
         return await this.git(['rev-parse', 'HEAD']);
@@ -693,7 +721,7 @@ export class Transactor {
         // the ACK get lost afterwards, so check reachability before treating this
         // as a failure — otherwise we'd roll back and report "nothing was changed"
         // for a write that IS on the remote, and the caller's retry would duplicate it.
-        await this.git(['fetch', this.cfg.remote, this.cfg.branch], {
+        await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
           timeoutMs: NETWORK_GIT_TIMEOUT_MS,
         });
         this.lastFetchAt = Date.now();
@@ -772,7 +800,10 @@ export class Transactor {
   }
 
   async recentChanges(limit: number, path?: string): Promise<string> {
-    const args = ['log', '--format=%h %an %ad %s', '--date=short', '-n', String(limit)];
+    const count = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.trunc(limit), 1), 200)
+      : 1;
+    const args = ['log', '--format=%h %an %ad %s', '--date=short', '-n', String(count)];
     if (path !== undefined) {
       args.push('--', path);
     }

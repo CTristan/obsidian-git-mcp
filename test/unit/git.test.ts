@@ -68,7 +68,7 @@ describe('runGit timeout', () => {
     // `--version` never touches the network or the working tree, so the default
     // timeout is irrelevant to whether it succeeds — this just proves the
     // no-options path still works once GitOptions grew a second field.
-    const out = await runGit(['--version'], dir);
+    const out = await runGit(['--version'], dir, { env: isolatedGitEnv() });
     expect(out).toContain('git version');
   });
 

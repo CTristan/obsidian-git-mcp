@@ -18,8 +18,11 @@ async function expectRemoteUnchanged(fx: Fixture, preRemote: string): Promise<vo
   expect(await fx.bareHead()).toBe(preRemote);
 }
 
+const RCE_PROBE_KEYS = new Set<string>();
+
 /** Seeds an RCE-probe flag on globalThis; a leaked ---js payload would flip it to true. */
 function setRceProbe(key: string, value: boolean): void {
+  RCE_PROBE_KEYS.add(key);
   (globalThis as Record<string, unknown>)[key] = value;
 }
 
@@ -38,6 +41,10 @@ describe('security', () => {
   });
 
   afterEach(async () => {
+    for (const key of RCE_PROBE_KEYS) {
+      delete (globalThis as Record<string, unknown>)[key];
+    }
+    RCE_PROBE_KEYS.clear();
     await srv.close();
     await fx.cleanup();
   });

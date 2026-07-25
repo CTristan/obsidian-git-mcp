@@ -36,7 +36,7 @@ describe('locking', () => {
 
   it('a foreign lockfile blocks writes with a clear error, and release unblocks', async () => {
     const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
-    await writeFile(lockPath, 'pid 99999\n');
+    await writeFile(lockPath, `pid ${process.pid}\n`);
 
     const blocked = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Blocked.md',

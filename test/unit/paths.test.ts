@@ -17,6 +17,8 @@ describe('forbiddenPathReason', () => {
     expect(forbiddenPathReason('.git/config')).toBeDefined();
     expect(forbiddenPathReason('.obsidian/app.json')).toBeDefined();
     expect(forbiddenPathReason('nested/.obsidian/app.json')).toBeDefined();
+    expect(forbiddenPathReason('-n')).toBeDefined();
+    expect(forbiddenPathReason('--upload-pack=probe')).toBeDefined();
   });
 
   it('refuses Windows trailing-dot and trailing-space aliases of restricted directories', () => {

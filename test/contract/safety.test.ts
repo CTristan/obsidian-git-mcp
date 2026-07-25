@@ -286,12 +286,15 @@ describe('transaction safety', () => {
     await git(['push', 'origin', 'main'], fx.collabDir);
 
     srv = await startServer(fx);
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'write_note', {
       path: 'Linked.md',
       content: 'pwned\n',
     });
     expect(res.isError).toBe(true);
     expect(existsSync(target)).toBe(false);
+    expect(await fx.bareHead()).toBe(preRemote);
+    await expectCleanCheckout(fx);
   });
 
   it('a dirty checkout refuses writes until reconciled', async () => {

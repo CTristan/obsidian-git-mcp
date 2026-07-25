@@ -27,7 +27,7 @@ describe('wrapper-added tools', () => {
     expect(status['behind']).toBe(0);
   });
 
-  it('every listed tool is callable — listing never exceeds the classified sets', async () => {
+  it('listing never exceeds the classified set', async () => {
     // If an MCPVault upgrade adds a tool we haven't classified, it must stay hidden
     // rather than being listed and then failing every call as "unknown tool". This
     // pin fails on upgrade until the new tool is classified.

@@ -36,7 +36,21 @@ try {
     remote: process.env['OGM_REMOTE']?.trim() || 'origin',
     allowDestructive: process.env['OGM_ALLOW_DESTRUCTIVE'] === '1',
   });
-  await server.connect(new StdioServerTransport());
+  let stopping = false;
+  const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
+    void server.close().finally(() => process.exit(0));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  try {
+    await server.connect(new StdioServerTransport());
+  } catch (err) {
+    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGTERM', shutdown);
+    throw err;
+  }
 } catch (err) {
   // Startup failures (bad vault path, unreachable remote) exit like argument errors do,
   // instead of surfacing as a raw unhandled-rejection stack trace.

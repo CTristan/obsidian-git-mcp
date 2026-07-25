@@ -26,6 +26,9 @@ export function forbiddenPathReason(path: string): string | undefined {
   if (slashed.split('/').includes('..')) {
     return 'path traversal is not allowed';
   }
+  if (slashed.startsWith('-')) {
+    return 'paths starting with "-" are not allowed';
+  }
   const segments = normalize(path).replaceAll('\\', '/').split('/');
   if (segments.includes('..')) return 'path traversal is not allowed';
   for (const segment of segments) {
