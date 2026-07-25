@@ -3,7 +3,12 @@ import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { GitError, runGit } from '../../src/git.js';
+import {
+  createGitExecutionCache,
+  GitError,
+  invalidateGitExecutionCache,
+  runGit,
+} from '../../src/git.js';
 
 // Pin both config layers on every git call so host insteadOf, a credential helper, a proxy, or a
 // leaked core.hooksPath can't change a command's behavior and make an assertion
@@ -24,6 +29,14 @@ afterAll(async () => {
 
 function isolatedGitEnv(globalConfig = emptyConfig): Record<string, string> {
   return { GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_SYSTEM: emptyConfig };
+}
+
+function gitConfigPath(path: string): string {
+  return path.replaceAll('\\', '/');
+}
+
+function shellCommandPath(path: string): string {
+  return `'${gitConfigPath(path).replaceAll("'", "'\\''")}'`;
 }
 
 describe('GitError credential redaction', () => {
@@ -74,7 +87,9 @@ describe('runGit timeout', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    // Windows can retain the killed Git process's working-directory handle briefly after
+    // the timeout rejects, so give recursive cleanup a bounded retry window.
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it('uses the default 30s ceiling when no timeoutMs is given', async () => {
@@ -117,14 +132,14 @@ describe('runGit host hook neutralization', () => {
     // that it ran. It exits 0 so the commit still succeeds — the marker, not a failed
     // commit, is what proves whether host-configured hook code executed.
     const hook = join(hooksDir, 'pre-commit');
-    await writeFile(hook, `#!/bin/sh\necho ran > "${markerPath}"\nexit 0\n`);
+    await writeFile(hook, `#!/bin/sh\necho ran > "${gitConfigPath(markerPath)}"\nexit 0\n`);
     await chmod(hook, 0o755);
     // Simulate the host's global git config leaking a core.hooksPath (plus the identity a
     // commit needs), the exact config layer a server-driven git command inherits.
     globalConfig = join(hooksDir, 'gitconfig');
     await writeFile(
       globalConfig,
-      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[core]\n\thooksPath = ${hooksDir}\n`,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[core]\n\thooksPath = ${gitConfigPath(hooksDir)}\n`,
     );
     await runGit(['init', '.'], dir, { env: isolatedGitEnv(globalConfig) });
   });
@@ -158,7 +173,10 @@ describe('runGit host execution-vector neutralization', () => {
     markerPath = join(probeDir, 'ran');
     probePath = join(probeDir, 'probe');
     globalConfig = join(probeDir, 'gitconfig');
-    await writeFile(probePath, `#!/bin/sh\necho ran > "${markerPath}"\ncat\n`);
+    await writeFile(
+      probePath,
+      `#!/bin/sh\necho ran > "${gitConfigPath(markerPath)}"\ncat\n`,
+    );
     await chmod(probePath, 0o755);
     await writeFile(
       globalConfig,
@@ -175,7 +193,7 @@ describe('runGit host execution-vector neutralization', () => {
   it('does not run a diff.external command inherited from host git config', async () => {
     await writeFile(
       globalConfig,
-      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${probePath}\n`,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${shellCommandPath(probePath)}\n`,
     );
     await writeFile(join(dir, 'note.md'), 'before\n');
     await runGit(['add', 'note.md'], dir, { env: isolatedGitEnv(globalConfig) });
@@ -188,10 +206,107 @@ describe('runGit host execution-vector neutralization', () => {
     expect(existsSync(markerPath)).toBe(false);
   });
 
+  it('re-reads execution config after an explicit transaction-boundary invalidation', async () => {
+    const cache = createGitExecutionCache();
+    await runGit(['status', '--porcelain'], dir, {
+      env: isolatedGitEnv(globalConfig),
+      executionCache: cache,
+    });
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[filter "probe"]\n\tclean = ${shellCommandPath(probePath)}\n`,
+    );
+
+    invalidateGitExecutionCache(cache);
+    await writeFile(join(dir, '.gitattributes'), '*.md filter=probe\n');
+    await writeFile(join(dir, 'note.md'), 'changed\n');
+    await runGit(['add', '.gitattributes', 'note.md'], dir, {
+      env: isolatedGitEnv(globalConfig),
+      executionCache: cache,
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('re-reads execution config when the config environment changes', async () => {
+    const cache = createGitExecutionCache();
+    await runGit(['status', '--porcelain'], dir, {
+      env: isolatedGitEnv(globalConfig),
+      executionCache: cache,
+    });
+    const secondConfig = join(probeDir, 'second-gitconfig');
+    await writeFile(
+      secondConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[filter "probe"]\n\tclean = ${shellCommandPath(probePath)}\n`,
+    );
+    await writeFile(join(dir, '.gitattributes'), '*.md filter=probe\n');
+    await writeFile(join(dir, 'note.md'), 'changed\n');
+
+    await runGit(['add', '.gitattributes', 'note.md'], dir, {
+      env: isolatedGitEnv(secondConfig),
+      executionCache: cache,
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('re-reads repository config when a reused cache switches GIT_DIR', async () => {
+    const otherRepo = await mkdtemp(join(probeDir, 'other-repo-'));
+    await runGit(['init', '.'], otherRepo, { env: isolatedGitEnv(globalConfig) });
+    await runGit(
+      ['config', 'filter.probe.clean', shellCommandPath(probePath)],
+      otherRepo,
+      { env: isolatedGitEnv(globalConfig) },
+    );
+    const cache = createGitExecutionCache();
+    await runGit(['status', '--porcelain'], dir, {
+      env: {
+        ...isolatedGitEnv(globalConfig),
+        GIT_DIR: join(dir, '.git'),
+        GIT_WORK_TREE: dir,
+      },
+      executionCache: cache,
+    });
+    await writeFile(join(dir, '.gitattributes'), '*.md filter=probe\n');
+    await writeFile(join(dir, 'note.md'), 'changed\n');
+
+    await runGit(['add', '.gitattributes', 'note.md'], dir, {
+      env: {
+        ...isolatedGitEnv(globalConfig),
+        GIT_DIR: join(otherRepo, '.git'),
+        GIT_WORK_TREE: dir,
+      },
+      executionCache: cache,
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it('keeps a newer cache entry when an overlapping older probe fails', async () => {
+    const cache = createGitExecutionCache();
+    const missingDir = join(probeDir, 'missing-worktree');
+
+    const [failed, succeeded] = await Promise.allSettled([
+      runGit(['status', '--porcelain'], missingDir, {
+        env: isolatedGitEnv(globalConfig),
+        executionCache: cache,
+      }),
+      runGit(['status', '--porcelain'], dir, {
+        env: isolatedGitEnv(globalConfig),
+        executionCache: cache,
+      }),
+    ]);
+
+    expect(failed.status).toBe('rejected');
+    expect(succeeded.status).toBe('fulfilled');
+    expect(cache.cwd).toBe(dir);
+    expect(cache.overrides).toBeDefined();
+  });
+
   it('neutralizes diff.external even when format-patch explicitly enables external diffs', async () => {
     await writeFile(
       globalConfig,
-      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${probePath}\n`,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${shellCommandPath(probePath)}\n`,
     );
     await writeFile(join(dir, 'note.md'), 'before\n');
     await runGit(['add', 'note.md'], dir, { env: isolatedGitEnv(globalConfig) });
@@ -209,7 +324,7 @@ describe('runGit host execution-vector neutralization', () => {
     await writeFile(attributesPath, '*.md filter=probe\n');
     await writeFile(
       globalConfig,
-      `[user]\n\tname = Probe\n\temail = probe@test.local\n[core]\n\tattributesFile = ${attributesPath}\n[filter "probe"]\n\tclean = ${probePath}\n`,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[core]\n\tattributesFile = ${gitConfigPath(attributesPath)}\n[filter "probe"]\n\tclean = ${shellCommandPath(probePath)}\n`,
     );
     await writeFile(join(dir, 'note.md'), 'body\n');
 
@@ -222,7 +337,7 @@ describe('runGit host execution-vector neutralization', () => {
     await writeFile(join(dir, '.gitattributes'), '*.md filter=probe\n');
     await writeFile(
       globalConfig,
-      `[user]\n\tname = Probe\n\temail = probe@test.local\n[filter "probe"]\n\tclean = ${probePath}\n`,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[filter "probe"]\n\tclean = ${shellCommandPath(probePath)}\n`,
     );
     await writeFile(join(dir, 'note.md'), 'body\n');
 
@@ -234,7 +349,7 @@ describe('runGit host execution-vector neutralization', () => {
   });
 
   it('does not run an explicitly supplied ext transport command', async () => {
-    await runGit(['ls-remote', `ext::${probePath}`], dir, {
+    await runGit(['ls-remote', `ext::${shellCommandPath(probePath)}`], dir, {
       env: isolatedGitEnv(globalConfig),
     }).catch(() => {});
 
@@ -246,10 +361,14 @@ describe('runGit host execution-vector neutralization', () => {
     process.env.GIT_DIR = join(probeDir, 'not-the-repository');
     try {
       expect(
-        await runGit(['rev-parse', '--show-toplevel'], dir, {
-          env: isolatedGitEnv(globalConfig),
-        }),
-      ).toBe(await realpath(dir));
+        gitConfigPath(
+          await runGit(['rev-parse', '--show-toplevel'], dir, {
+            env: isolatedGitEnv(globalConfig),
+          }),
+        ),
+      ).toBe(
+        gitConfigPath(await realpath(dir)),
+      );
     } finally {
       if (previous === undefined) delete process.env.GIT_DIR;
       else process.env.GIT_DIR = previous;

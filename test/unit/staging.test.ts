@@ -25,11 +25,42 @@ import {
   DIR_CONCURRENCY,
   manifestOf,
   openPinnedHandle,
+  requiresNoFollowFlag,
   writeAllAt,
   type Manifest,
 } from '../../src/staging.js';
 
 vi.mock('node:fs/promises', { spy: true });
+
+describe('O_NOFOLLOW portability', () => {
+  it('requires the flag on POSIX but relies on post-open pinning when Windows lacks it', () => {
+    expect(requiresNoFollowFlag('linux', 0x20_000)).toBe(true);
+    expect(requiresNoFollowFlag('darwin', 0x20_000)).toBe(true);
+    expect(requiresNoFollowFlag('linux', undefined)).toBe(true);
+    expect(requiresNoFollowFlag('win32', undefined)).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'requires exclusive creation when Windows cannot reject reparse points at open',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'ogm-win-create-'));
+      const target = join(root, 'note.md');
+      try {
+        await expect(
+          openPinnedHandle(
+            target,
+            target,
+            target,
+            constants.O_WRONLY | constants.O_CREAT,
+            (message) => new Error(message),
+          ),
+        ).rejects.toThrow(/requires O_EXCL/);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
 
 describe('applyCloneDiff symlink safety', () => {
   let root: string;
@@ -92,9 +123,19 @@ describe('applyCloneDiff symlink safety', () => {
     }) as typeof fsPromises.open);
 
     try {
-      await expect(
-        applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, new Map(), after),
-      ).rejects.toMatchObject({ code: 'ELOOP' });
+      const err: unknown = await applyCloneDiff(
+        vaultPath,
+        await realpath(vaultPath),
+        cloneDir,
+        new Map(),
+        after,
+      ).catch((caught: unknown) => caught);
+      if (process.platform === 'win32') {
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(/clone source path changed during the write/);
+      } else {
+        expect(err).toMatchObject({ code: 'ELOOP' });
+      }
       expect(await readFile(target, 'utf8')).toBe('original\n');
     } finally {
       openSpy.mockRestore();
@@ -304,8 +345,8 @@ describe('cloneWorktree failure cleanup', () => {
     await rm(tmpRoot, { recursive: true, force: true });
   });
 
-  // Skipped as root, where a 0000 file stays readable and cp would never fail.
-  it.skipIf(process.getuid?.() === 0)(
+  // Windows and root do not enforce this POSIX mode-bit failure consistently.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'removes its mkdtemp dir when copying an entry fails',
     async () => {
       // A readable note copies fine; an unreadable one makes cp() throw partway through the
@@ -521,7 +562,7 @@ describe('writeAllAt short-write resilience', () => {
 
 describe('openPinnedHandle path pinning', () => {
   let root: string;
-  const writeFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW;
+  const writeFlags = constants.O_WRONLY | constants.O_NOFOLLOW;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'ogm-pin-'));
@@ -553,33 +594,41 @@ describe('openPinnedHandle path pinning', () => {
     expect(await readFile(target, 'utf8')).toBe('written through the pinned handle\n');
   });
 
-  it('refuses callers that omit O_NOFOLLOW from the open flags', async () => {
-    const target = join(root, 'note.md');
-    await writeFile(target, 'seed\n');
-    const expectedReal = await realpath(target);
+  it.skipIf(process.platform === 'win32')(
+    'refuses callers that omit O_NOFOLLOW from the open flags',
+    async () => {
+      const target = join(root, 'note.md');
+      await writeFile(target, 'seed\n');
+      const expectedReal = await realpath(target);
 
-    await expect(
-      openPinnedHandle(
-        target,
-        target,
-        expectedReal,
-        constants.O_WRONLY,
-        (message) => new Error(message),
-      ),
-    ).rejects.toThrow(/requires O_NOFOLLOW/);
-  });
+      await expect(
+        openPinnedHandle(
+          target,
+          target,
+          expectedReal,
+          constants.O_WRONLY,
+          (message) => new Error(message),
+        ),
+      ).rejects.toThrow(/requires O_NOFOLLOW/);
+    },
+  );
 
-  it('refuses to open when the final path segment is a symlink', async () => {
-    const real = join(root, 'real.md');
-    const link = join(root, 'link.md');
-    await writeFile(real, 'seed\n');
-    await symlink(real, link);
+  it.skipIf(process.platform === 'win32')(
+    'refuses to open when the final path segment is a symlink',
+    async () => {
+      const real = join(root, 'real.md');
+      const link = join(root, 'link.md');
+      await writeFile(real, 'seed\n');
+      await symlink(real, link);
 
-    await expect(
-      openPinnedHandle(link, link, await realpath(link), writeFlags, (message) => new Error(message)),
-    ).rejects.toMatchObject({ code: 'ELOOP' });
-    expect(await readFile(real, 'utf8')).toBe('seed\n');
-  });
+      await expect(
+        openPinnedHandle(link, link, await realpath(link), writeFlags, (message) =>
+          new Error(message),
+        ),
+      ).rejects.toMatchObject({ code: 'ELOOP' });
+      expect(await readFile(real, 'utf8')).toBe('seed\n');
+    },
+  );
 
   it('accepts a distinct symlink-containing re-resolution path that still reaches the pinned file', async () => {
     const realDir = join(root, 'real');

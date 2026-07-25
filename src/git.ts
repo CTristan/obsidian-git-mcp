@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +35,23 @@ export class GitError extends Error {
 export interface GitOptions {
   env?: Record<string, string>;
   timeoutMs?: number;
+  executionCache?: GitExecutionCache;
+}
+
+export interface GitExecutionCache {
+  cwd?: string;
+  configEnvKey?: string;
+  overrides?: Promise<string[]>;
+}
+
+export function createGitExecutionCache(): GitExecutionCache {
+  return {};
+}
+
+export function invalidateGitExecutionCache(cache: GitExecutionCache): void {
+  delete cache.cwd;
+  delete cache.configEnvKey;
+  delete cache.overrides;
 }
 
 interface HardeningState {
@@ -123,6 +141,47 @@ async function configuredExecutionOverrides(
   return overrides;
 }
 
+async function cachedExecutionOverrides(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  base: string[],
+  cache: GitExecutionCache | undefined,
+): Promise<string[]> {
+  if (cache === undefined) {
+    return configuredExecutionOverrides(cwd, env, base);
+  }
+  const configEnvKey = createHash('sha256')
+    .update(
+      JSON.stringify(
+        Object.entries(env)
+          .filter(
+            ([key]) =>
+              key.startsWith('GIT_') || key === 'HOME' || key === 'XDG_CONFIG_HOME',
+          )
+          .sort(([left], [right]) => left.localeCompare(right)),
+      ),
+    )
+    .digest('hex');
+  if (
+    cache.cwd !== cwd ||
+    cache.configEnvKey !== configEnvKey ||
+    cache.overrides === undefined
+  ) {
+    cache.cwd = cwd;
+    cache.configEnvKey = configEnvKey;
+    cache.overrides = configuredExecutionOverrides(cwd, env, base);
+  }
+  const pending = cache.overrides;
+  try {
+    return await pending;
+  } catch (err) {
+    // A newer caller may have installed a different entry while this probe was pending.
+    // Only the owner of the rejected promise can clear it.
+    if (cache.overrides === pending) invalidateGitExecutionCache(cache);
+    throw err;
+  }
+}
+
 function hardenCommandArgs(args: string[]): string[] {
   const command = args[0];
   const remaining = args.slice(1).filter((arg) => arg !== '--ext-diff' && arg !== '--textconv');
@@ -153,7 +212,12 @@ export async function runGit(
   try {
     const base = hardenedConfig();
     const env = gitEnv(options.env);
-    const executionOverrides = await configuredExecutionOverrides(cwd, env, base);
+    const executionOverrides = await cachedExecutionOverrides(
+      cwd,
+      env,
+      base,
+      options.executionCache,
+    );
     const { stdout } = await exec(
       'git',
       [...base, ...executionOverrides, ...hardenCommandArgs(args)],

@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFixture, git, type Fixture } from '../fixture.js';
@@ -643,6 +643,34 @@ describe('Transactor.transact return shape', () => {
 
   afterEach(async () => {
     await fx.cleanup();
+  });
+
+  it('rescans included execution config after the mutation before staging', async () => {
+    const probePath = join(fx.root, 'filter-probe');
+    const markerPath = join(fx.root, 'filter-ran');
+    const forward = (path: string): string => path.replaceAll('\\', '/');
+    const shellCommand = (path: string): string =>
+      `'${forward(path).replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      probePath,
+      `#!/bin/sh\necho ran > "${forward(markerPath)}"\ncat\n`,
+    );
+    await chmod(probePath, 0o755);
+    // The include target starts absent, so the transaction's pre-mutation scan cannot
+    // discover the filter that the delegated write is about to introduce.
+    await git(['config', 'include.path', '../.ogm-execution-config'], fx.serverDir);
+    const transactor = makeTransactor(fx);
+
+    await transactor.transact('introduced included config', async () => {
+      await writeFile(
+        join(fx.serverDir, '.ogm-execution-config'),
+        `[filter "probe"]\n\tclean = ${shellCommand(probePath)}\n`,
+      );
+      await writeFile(join(fx.serverDir, '.gitattributes'), '*.md filter=probe\n');
+      await writeFile(join(fx.serverDir, 'Inbox', 'Beta.md'), '# Beta\n\nupdated\n');
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
   });
 
   it('returns the pushed SHA alongside the mutation callback result', async () => {

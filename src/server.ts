@@ -17,6 +17,7 @@ import { appendToSection } from './append.js';
 import { forbiddenPathReason } from './paths.js';
 import {
   applyCloneDiff,
+  changedManifestPaths,
   cloneWorktree,
   manifestOf,
   openPinnedHandle,
@@ -506,6 +507,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         const callResult = await callStagedTool(stage, name, args);
 
         const after = await manifestOf(stage);
+        await transactor.refuseIgnoredPaths(changedManifestPaths(before, after));
         await applyCloneDiff(vaultPath, realVaultPath, stage, before, after);
 
         // Defense in depth: re-resolve the arg paths against the LIVE vault after applying,
@@ -570,6 +572,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (reason) {
         throw new InnerToolError(`${path}: ${reason}`);
       }
+      await transactor.refuseIgnoredPaths([relative(realVaultPath, real).replaceAll('\\', '/')]);
       // fd-pin the write against a TOCTOU swap between this resolution and the write,
       // through the same guard applyCloneDiff's writer uses (staging.ts). We re-resolve
       // absPath rather than real, so the recheck covers absPath's whole symlink chain, not

@@ -63,6 +63,15 @@ describe('validateNoteContent', () => {
     );
   });
 
+  it('wraps an unsupported frontmatter engine in an actionable ValidationError', () => {
+    const content = '---toml\ntitle = "unsupported"\n---\nBody\n';
+    expect(() => validateNoteContent('Note.md', content)).toThrow(ValidationError);
+    expect(() => validateNoteContent('Note.md', content)).toThrow(
+      /Note\.md: unsupported frontmatter engine/,
+    );
+    expect(() => validateNoteContent('Note.md', content)).toThrow(/toml/);
+  });
+
   it('rejects the same malformed frontmatter on every call, not just the first', () => {
     // Regression: gray-matter caches by content string but writes the cache entry
     // before parsing completes, so a failed parse used to leave an empty-data object
@@ -193,5 +202,13 @@ describe('refuseExecutableFrontmatter', () => {
     expect(() =>
       refuseExecutableFrontmatter('Note.md', '---\ntitle: [unclosed\n---\nBody\n'),
     ).not.toThrow();
+  });
+
+  it('refuses an unsupported frontmatter engine with path context', () => {
+    const content = '---toml\ntitle = "unsupported"\n---\nBody\n';
+    expect(() => refuseExecutableFrontmatter('Note.md', content)).toThrow(ValidationError);
+    expect(() => refuseExecutableFrontmatter('Note.md', content)).toThrow(
+      /Note\.md: unsupported frontmatter engine/,
+    );
   });
 });

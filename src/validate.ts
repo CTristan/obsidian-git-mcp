@@ -66,9 +66,14 @@ export function validateNoteContent(path: string, content: string): void {
     if (err instanceof ValidationError) {
       throw new ValidationError(`${path}: ${err.message}`);
     }
-    if (!isYamlParseError(err)) throw err;
+    const detail = err instanceof Error ? err.message : String(err);
+    if (isYamlParseError(err)) {
+      throw new ValidationError(
+        `${path}: frontmatter YAML does not parse: ${detail}`,
+      );
+    }
     throw new ValidationError(
-      `${path}: frontmatter YAML does not parse: ${(err as Error).message}`,
+      `${path}: unsupported frontmatter engine or invalid frontmatter: ${detail}`,
     );
   }
 }
@@ -89,6 +94,11 @@ export function refuseExecutableFrontmatter(path: string, content: string): void
     if (err instanceof ValidationError) {
       throw new ValidationError(`${path}: ${err.message}`);
     }
-    if (!isYamlParseError(err)) throw err;
+    if (!isYamlParseError(err)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new ValidationError(
+        `${path}: unsupported frontmatter engine or invalid frontmatter: ${detail}`,
+      );
+    }
   }
 }

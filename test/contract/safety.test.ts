@@ -345,9 +345,8 @@ describe('transaction safety', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('gitignore');
     await expectRolledBack(fx, preRemote, preHead);
-    // Restoring pre-existing ignored bytes needs the separate snapshot/refusal design
-    // tracked by #11; this guard proves the mutation cannot masquerade as a committed write.
-    expect(postContent).toBe('# Secret\n\nmutated\n');
+    // The ignored-path preflight must reject before the staged bytes reach the live vault.
+    expect(postContent).toBe(original);
   });
 
   it('a write that only creates a newly-gitignored file is refused, not left on disk', async () => {

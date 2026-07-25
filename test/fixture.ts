@@ -9,13 +9,15 @@ const exec = promisify(execFile);
 // Strip every inherited GIT_* variable before setting our own: GIT_DIR, GIT_WORK_TREE,
 // GIT_INDEX_FILE, and friends would otherwise point fixture git at a parent repository
 // (e.g. when the suite runs inside a git hook or nested git invocation), so a fixture
-// could read or mutate the wrong checkout. GIT_CONFIG_GLOBAL/SYSTEM then point at /dev/null
-// so no host config — a global hook, alias, or signing setting — can change test behavior.
+// could read or mutate the wrong checkout. GIT_CONFIG_GLOBAL/SYSTEM then point at the
+// platform's null device so no host config (a global hook, alias, or signing setting) can
+// change test behavior.
+const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 const FIXTURE_GIT_ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
   GIT_TERMINAL_PROMPT: '0',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_GLOBAL: NULL_DEVICE,
+  GIT_CONFIG_SYSTEM: NULL_DEVICE,
 };
 
 export async function git(args: string[], cwd: string): Promise<string> {
@@ -30,6 +32,9 @@ async function configureClone(dir: string, name: string, email: string): Promise
   await git(['config', 'user.name', name], dir);
   await git(['config', 'user.email', email], dir);
   await git(['config', 'commit.gpgsign', 'false'], dir);
+  await git(['config', 'core.autocrlf', 'false'], dir);
+  await git(['config', 'core.eol', 'lf'], dir);
+  await git(['config', 'core.symlinks', 'true'], dir);
 }
 
 export const SEED_NOTES: Record<string, string> = {
@@ -115,7 +120,7 @@ async function buildFixture(
   await git(['init', '--bare', '-b', 'main', '.'], bareDir);
 
   // Seed the remote through a scratch clone so server/collab clones start populated.
-  await git(['clone', bareDir, seedDir], root);
+  await git(['-c', 'core.autocrlf=false', 'clone', bareDir, seedDir], root);
   await configureClone(seedDir, 'Seeder', 'seeder@fixture.local');
   await git(['checkout', '-b', 'main'], seedDir);
   for (const [path, content] of Object.entries(SEED_NOTES)) {
@@ -126,9 +131,9 @@ async function buildFixture(
   await git(['commit', '-m', 'Seed vault'], seedDir);
   await git(['push', 'origin', 'main'], seedDir);
 
-  await git(['clone', bareDir, serverDir], root);
+  await git(['-c', 'core.autocrlf=false', 'clone', bareDir, serverDir], root);
   await configureClone(serverDir, 'Server Fallback', 'server@fixture.local');
-  await git(['clone', bareDir, collabDir], root);
+  await git(['-c', 'core.autocrlf=false', 'clone', bareDir, collabDir], root);
   await configureClone(collabDir, 'Collaborator', 'collab@fixture.local');
 
   return {

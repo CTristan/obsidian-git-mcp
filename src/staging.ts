@@ -35,6 +35,17 @@ export interface ManifestEntry {
 /** Every file/symlink under a staged clone, keyed by clone-relative path. */
 export type Manifest = Map<string, ManifestEntry>;
 
+export function changedManifestPaths(before: Manifest, after: Manifest): string[] {
+  const changed: string[] = [];
+  for (const [rel, entry] of after) {
+    if (!isUnchanged(before.get(rel), entry)) changed.push(rel);
+  }
+  for (const rel of before.keys()) {
+    if (!after.has(rel)) changed.push(rel);
+  }
+  return changed;
+}
+
 /**
  * Cap on how many lstat calls manifestOf keeps outstanding at once, applied globally across
  * the whole recursive walk, not per directory. A flat attachments folder with years of pasted
@@ -236,11 +247,14 @@ async function mkdirNoFollow(vaultPath: string, rel: string): Promise<void> {
 }
 
 /**
- * Open `openTarget` for writing and hand back a handle pinned to `expectedReal`, or throw
+ * Open `openTarget` and hand back a handle pinned to `expectedReal`, or throw
  * (via `makeMismatchError`, closing the handle first) if the two go out of sync between
- * resolution and open. `flags` must carry O_NOFOLLOW, so a symlink dropped in at the final
- * path segment fails the open outright rather than getting silently followed. Two checks
- * cover what O_NOFOLLOW alone can't:
+ * resolution and open. POSIX flags must carry O_NOFOLLOW, so a symlink dropped in at the
+ * final path segment fails the open outright rather than getting silently followed. Windows
+ * does not expose O_NOFOLLOW, so new-file opens must use O_CREAT | O_EXCL (an atomic create
+ * that refuses an entry already planted there), and existing-file opens omit O_CREAT. The
+ * same post-open checks below then run before callers read, truncate, or write through the
+ * handle. Two checks cover that platform and what O_NOFOLLOW alone cannot:
  *
  * - `reResolveTarget` (the same path as `openTarget` for a caller that resolved its target
  *   right before opening it; the caller's original, possibly symlink-laden argument for one
@@ -264,8 +278,19 @@ export async function openPinnedHandle(
   flags: number,
   makeMismatchError: (message: string) => Error,
 ): Promise<FileHandle> {
-  if ((flags & constants.O_NOFOLLOW) === 0) {
+  const noFollowFlag = constants.O_NOFOLLOW as number | undefined;
+  if (
+    requiresNoFollowFlag(process.platform, noFollowFlag) &&
+    (flags & noFollowFlag!) === 0
+  ) {
     throw new Error('openPinnedHandle requires O_NOFOLLOW');
+  }
+  if (
+    process.platform === 'win32' &&
+    (flags & constants.O_CREAT) !== 0 &&
+    (flags & constants.O_EXCL) === 0
+  ) {
+    throw new Error('openPinnedHandle requires O_EXCL for Windows file creation');
   }
   const handle = await open(openTarget, flags, 0o644);
   try {
@@ -287,6 +312,13 @@ export async function openPinnedHandle(
   return handle;
 }
 
+export function requiresNoFollowFlag(
+  platform: NodeJS.Platform,
+  _noFollowFlag: number | undefined,
+): boolean {
+  return platform !== 'win32';
+}
+
 /**
  * Copy one changed/added clone file into the real vault through openPinnedHandle. Strict
  * equality against `join(realVaultPath, rel)`, not mere containment: a diff path never
@@ -300,23 +332,39 @@ async function writeIntoVault(
   vaultPath: string,
   realVaultPath: string,
   cloneDir: string,
+  realCloneDir: string,
   rel: string,
 ): Promise<void> {
   const target = join(vaultPath, rel);
   await mkdirNoFollow(vaultPath, rel);
+  let targetExists = true;
+  try {
+    await lstat(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    targetExists = false;
+  }
+  // Windows cannot express O_NOFOLLOW through Node. Existing files open without O_CREAT
+  // and are pinned before any write; new files use O_EXCL, whose atomic create refuses a
+  // reparse point or any other entry planted at the final segment.
+  const creationFlags = targetExists ? 0 : constants.O_CREAT | constants.O_EXCL;
   const handle = await openPinnedHandle(
     target,
     target,
     join(realVaultPath, rel),
-    constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
+    constants.O_WRONLY | creationFlags | constants.O_NOFOLLOW,
     (message) => new Error(`${rel}: ${message}`),
   );
   try {
     // The vault handle is pinned before any bytes move; the clone read only opens after, and
     // applyCloneDiff already refused any symlink in the diff, so rel is a plain file here.
-    const source = await open(
-      join(cloneDir, rel),
+    const sourceTarget = join(cloneDir, rel);
+    const source = await openPinnedHandle(
+      sourceTarget,
+      sourceTarget,
+      join(realCloneDir, rel),
       constants.O_RDONLY | constants.O_NOFOLLOW,
+      (message) => new Error(`${rel}: clone source ${message}`),
     );
     try {
       // truncate first, because a shrinking write would otherwise leave stale trailing bytes.
@@ -447,6 +495,7 @@ export async function applyCloneDiff(
   before: Manifest,
   after: Manifest,
 ): Promise<void> {
+  const realCloneDir = await realpath(cloneDir);
   for (const [rel, entry] of after) {
     if (isUnchanged(before.get(rel), entry)) continue;
     const forbidden = forbiddenPathReason(rel);
@@ -456,7 +505,7 @@ export async function applyCloneDiff(
     if (entry.isSymlink) {
       throw new Error(`${rel}: refusing to copy a symlink created during the write`);
     }
-    await writeIntoVault(vaultPath, realVaultPath, cloneDir, rel);
+    await writeIntoVault(vaultPath, realVaultPath, cloneDir, realCloneDir, rel);
   }
   const deleted: string[] = [];
   for (const rel of before.keys()) {

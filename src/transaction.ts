@@ -2,7 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mapWithConcurrency } from './concurrency.js';
-import { runGit, type GitOptions } from './git.js';
+import {
+  createGitExecutionCache,
+  GitError,
+  invalidateGitExecutionCache,
+  runGit,
+  type GitOptions,
+} from './git.js';
 
 export class TransactionError extends Error {
   override name = 'TransactionError';
@@ -163,6 +169,7 @@ export class Transactor {
   private chain: Promise<unknown> = Promise.resolve();
   private lastFetchAt = 0;
   private readonly lockPath: string;
+  private readonly gitExecutionCache = createGitExecutionCache();
   // The HEAD through which every note has already cleared refuseExecutableNote. undefined
   // until reconcileAtStartup's first pass; readTransaction advances it after each scan.
   private validatedThroughSha: string | undefined;
@@ -178,9 +185,38 @@ export class Transactor {
   }
 
   private async git(args: string[], options?: GitOptions): Promise<string> {
-    const result = await runGit(args, this.cfg.vaultPath, options);
+    const result = await runGit(args, this.cfg.vaultPath, {
+      ...options,
+      executionCache: this.gitExecutionCache,
+    });
     await this.cfg.onGitCall?.(args);
     return result;
+  }
+
+  private invalidateGitExecutionConfig(): void {
+    invalidateGitExecutionCache(this.gitExecutionCache);
+  }
+
+  private async gitChangingWorktree(args: string[], options?: GitOptions): Promise<string> {
+    try {
+      return await this.git(args, options);
+    } finally {
+      // A successful or partial worktree change can expose a different included Git config.
+      // Clear the scan before any later command can execute a newly selected filter or diff.
+      this.invalidateGitExecutionConfig();
+    }
+  }
+
+  private async fetchRemote(): Promise<void> {
+    try {
+      await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
+        timeoutMs: NETWORK_GIT_TIMEOUT_MS,
+      });
+    } finally {
+      // A config file can change while a network operation runs, including one that fails.
+      // Force the next command to rescan before it trusts execution-capable Git settings.
+      this.invalidateGitExecutionConfig();
+    }
   }
 
   /**
@@ -489,6 +525,27 @@ export class Transactor {
     return hash.digest('hex');
   }
 
+  async refuseIgnoredPaths(relPaths: readonly string[]): Promise<void> {
+    const candidates = [...new Set(relPaths)].filter((relPath) => relPath !== '');
+    if (candidates.length === 0) return;
+    const ignored: string[] = [];
+    for (const relPath of candidates) {
+      try {
+        await this.git(['check-ignore', '-q', '--', relPath]);
+        ignored.push(relPath);
+      } catch (err) {
+        // check-ignore exits 1 with no stderr when this path is not ignored.
+        if (!(err instanceof GitError) || err.stderr !== '') throw err;
+      }
+    }
+    if (ignored.length > 0) {
+      throw new HiddenIgnoredWriteError(
+        `the mutation targets gitignored path(s) [${ignored.join(', ')}] that git can ` +
+          'neither stage nor commit; refusing before the live vault is changed',
+      );
+    }
+  }
+
   /** Paths our current HEAD touches relative to `ref` — the committed analog of changedPaths(). */
   private async changedPathsSince(ref: string): Promise<string[]> {
     const out = await this.git(['diff', '--name-only', '-z', ref, 'HEAD']);
@@ -527,6 +584,7 @@ export class Transactor {
    * the caller never received a SHA for it.
    */
   async reconcileAtStartup(): Promise<void> {
+    this.invalidateGitExecutionConfig();
     // A crashed process can't release its lock, and the lock lives in .git/ where tree
     // recovery never looks — but only a DEAD holder's lock is safe to clear. Clear it and
     // take our own lock in one atomic loop: a separate clear-then-acquire leaves a window
@@ -546,17 +604,15 @@ export class Transactor {
             `for branch '${this.cfg.branch}'; refusing to start`,
         );
       }
-      await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
-        timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-      });
+      await this.fetchRemote();
       this.lastFetchAt = Date.now();
       const unpushed = (await this.git(['rev-list', `${this.target()}..HEAD`])) !== '';
       if ((await this.isDirty()) || unpushed) {
-        await this.git(['rebase', '--abort']).catch(() => {});
-        await this.git(['reset', '--hard', this.target()]);
-        await this.git(['clean', '-fd']);
+        await this.gitChangingWorktree(['rebase', '--abort']).catch(() => {});
+        await this.gitChangingWorktree(['reset', '--hard', this.target()]);
+        await this.gitChangingWorktree(['clean', '-fd']);
       } else {
-        await this.git(['merge', '--ff-only', this.target()]);
+        await this.gitChangingWorktree(['merge', '--ff-only', this.target()]);
       }
       // Establishes the baseline before this process ever serves a read — a vault that
       // already carries an executable-frontmatter note refuses to come up rather than
@@ -583,6 +639,7 @@ export class Transactor {
    */
   readTransaction<T>(read: () => Promise<T>): Promise<{ headSha: string; result: T }> {
     return this.enqueue(async () => {
+      this.invalidateGitExecutionConfig();
       // acquireLock sits outside the try (same invariant as transact()): a failed acquire
       // must never reach the finally, because unlinking a foreign process's lockfile would
       // let a writer and this read interleave on the shared worktree.
@@ -593,14 +650,12 @@ export class Transactor {
           // failing them (writes stay strict — their own fetch is unguarded). The
           // timestamp advances even on failure so an outage doesn't stall every read
           // behind a fetch timeout.
-          await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
-            timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-          }).catch(() => {});
+          await this.fetchRemote().catch(() => {});
           this.lastFetchAt = Date.now();
           if (!(await this.isDirty())) {
             // A diverged checkout can't fast-forward; reads then serve the last consistent
             // state rather than failing, and the next write will surface the problem.
-            await this.git(['merge', '--ff-only', this.target()]).catch(() => {});
+            await this.gitChangingWorktree(['merge', '--ff-only', this.target()]).catch(() => {});
           }
         }
         // Unconditional, not gated on this call's own fetch above: transact()'s mandatory
@@ -619,6 +674,7 @@ export class Transactor {
   /** Run one mutation as a full transaction. Returns the pushed commit SHA and the mutation's result. */
   transact<T>(message: string, mutate: () => Promise<T>): Promise<{ sha: string; result: T }> {
     return this.enqueue(async () => {
+      this.invalidateGitExecutionConfig();
       // acquireLock sits outside the try: a failed acquire must never reach the finally,
       // because unlinking a foreign process's lockfile would let two writers interleave.
       await this.acquireLock();
@@ -633,11 +689,9 @@ export class Transactor {
             'the checkout is dirty; refusing to write (restart the server to reconcile)',
           );
         }
-        await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
-          timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-        });
+        await this.fetchRemote();
         this.lastFetchAt = Date.now();
-        await this.git(['merge', '--ff-only', this.target()]);
+        await this.gitChangingWorktree(['merge', '--ff-only', this.target()]);
         // Same guard reconcileAtStartup and readTransaction run before serving anything
         // from HEAD: this fetch/merge can land a note carrying executable frontmatter, and
         // mutate() below is about to hand delegated tools a clone of this very HEAD, whose
@@ -647,7 +701,14 @@ export class Transactor {
         const ignoredBefore = await this.ignoredFiles();
         const ignoredBeforeFingerprint = await this.ignoredFingerprint(ignoredBefore);
 
-        const result = await mutate();
+        let result: T;
+        try {
+          result = await mutate();
+        } finally {
+          // A delegated mutation can change an included config file in the worktree.
+          // Rescan before status, validation, staging, or any rollback command runs.
+          this.invalidateGitExecutionConfig();
+        }
 
         const changed = await this.changedPaths();
         const ignoredBeforeSet = new Set(ignoredBefore);
@@ -702,9 +763,9 @@ export class Transactor {
         return { sha: await this.pushWithRetries(), result };
       } catch (err) {
         if (rollbackTo !== undefined && !(err instanceof IndeterminatePushError)) {
-          await this.git(['rebase', '--abort']).catch(() => {});
-          await this.git(['reset', '--hard', rollbackTo]).catch(() => {});
-          await this.git(['clean', '-fd']).catch(() => {});
+          await this.gitChangingWorktree(['rebase', '--abort']).catch(() => {});
+          await this.gitChangingWorktree(['reset', '--hard', rollbackTo]).catch(() => {});
+          await this.gitChangingWorktree(['clean', '-fd']).catch(() => {});
         }
         // ls-files --ignored lists files, never directories, so unlink is the right
         // removal for every entry here.
@@ -737,9 +798,7 @@ export class Transactor {
         // as a failure — otherwise we'd roll back and report "nothing was changed"
         // for a write that IS on the remote, and the caller's retry would duplicate it.
         try {
-          await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
-            timeoutMs: NETWORK_GIT_TIMEOUT_MS,
-          });
+          await this.fetchRemote();
         } catch (fetchErr) {
           throw new IndeterminatePushError(
             'the push failed and the remote could not be re-read, so whether the commit ' +
@@ -768,11 +827,14 @@ export class Transactor {
         // The remote advanced under us. Rebasing our single commit is safe when it
         // applies cleanly; an actual conflict aborts and rolls the transaction back.
         try {
-          await this.git(['-c', 'commit.gpgsign=false', 'rebase', this.target()], {
-            env: this.commitEnv(),
-          });
+          await this.gitChangingWorktree(
+            ['-c', 'commit.gpgsign=false', 'rebase', this.target()],
+            {
+              env: this.commitEnv(),
+            },
+          );
         } catch (rebaseErr) {
-          await this.git(['rebase', '--abort']).catch(() => {});
+          await this.gitChangingWorktree(['rebase', '--abort']).catch(() => {});
           throw new ConflictError(
             'a concurrent edit conflicts with this write; nothing was changed: ' +
               (rebaseErr as Error).message,
