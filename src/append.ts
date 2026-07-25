@@ -18,7 +18,7 @@ const HEADING = /^ {0,3}(#{1,6})(?:\s+(.+?))?(?:\s+#+)?\s*$/;
 // "." never matches the "\r", "$" (no `m` flag) never reaches it, and the fence fails to
 // match at all. Keeping the "\r" out of the captured suffix means it can't flip the
 // backtick-info-string opener check or the whitespace-only closer check either.
-const FENCE = /^ {0,3}(`{3,}|~{3,})([^\r]*)\r?$/;
+const FENCE = /^ {0,3}((?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})([^\r]*)\r?$/;
 
 // A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
 // line inside a ``` example); both scans below need to ignore those, so this returns,
@@ -43,8 +43,9 @@ function fenceMask(
     const wasFenced = inFence;
     const m = FENCE.exec(line);
     if (m) {
-      const marker = m[1]!;
-      const suffix = m[2]!;
+      const listPrefix = m[1]!;
+      const marker = m[2]!;
+      const suffix = m[3]!;
       if (!inFence) {
         // A backtick fence whose info string contains a backtick is not a valid opener
         // per CommonMark — otherwise inline code like "```foo`bar`" would masquerade as
@@ -57,6 +58,7 @@ function fenceMask(
           openFenceAt = i;
         }
       } else if (
+        listPrefix === '' &&
         marker[0] === fenceChar &&
         marker.length >= fenceLen &&
         // A closing fence marker may be followed only by whitespace (CommonMark) — a

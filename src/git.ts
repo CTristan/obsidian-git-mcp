@@ -91,7 +91,7 @@ function gitEnv(overrides: Record<string, string> | undefined): NodeJS.ProcessEn
 }
 
 const EXECUTION_CONFIG =
-  '^(filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv))$';
+  '^(diff\\.external|filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv))$';
 
 async function configuredExecutionOverrides(
   cwd: string,
@@ -124,8 +124,18 @@ async function configuredExecutionOverrides(
 }
 
 function hardenCommandArgs(args: string[]): string[] {
-  if (args[0] === 'diff' || args[0] === 'log' || args[0] === 'show') {
-    return [args[0], '--no-ext-diff', '--no-textconv', ...args.slice(1)];
+  const command = args[0];
+  const remaining = args.slice(1).filter((arg) => arg !== '--ext-diff' && arg !== '--textconv');
+  if (
+    command === 'diff' ||
+    command === 'log' ||
+    command === 'show' ||
+    command === 'format-patch'
+  ) {
+    return [command, '--no-ext-diff', '--no-textconv', ...remaining];
+  }
+  if (command === 'blame' || command === 'grep') {
+    return [command, '--no-textconv', ...remaining];
   }
   return args;
 }
@@ -161,10 +171,14 @@ export async function runGit(
       message?: string;
       killed?: boolean;
       signal?: string;
+      code?: string | number;
     };
-    const detail = e.killed
-      ? `timed out after ${options.timeoutMs ?? 30_000}ms${e.signal ? ` (${e.signal})` : ''}`
-      : e.stderr?.trim() || e.message || 'unknown error';
+    const detail =
+      e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+        ? 'output exceeded the 16 MiB buffer'
+        : e.killed
+          ? `timed out after ${options.timeoutMs ?? 30_000}ms${e.signal ? ` (${e.signal})` : ''}`
+          : e.stderr?.trim() || e.message || 'unknown error';
     throw new GitError(`git ${args.join(' ')} failed: ${detail}`, args, e.stderr ?? '');
   }
 }

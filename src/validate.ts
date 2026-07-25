@@ -33,6 +33,15 @@ function parseWithSafeEngines(content: string): void {
   matter(content, { engines: SAFE_ENGINES });
 }
 
+function isYamlParseError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name?: unknown }).name === 'YAMLException'
+  );
+}
+
 /**
  * Wrapper-level content validation, run on every file a transaction changed before it
  * is committed. Failing here rolls the whole transaction back.
@@ -57,6 +66,7 @@ export function validateNoteContent(path: string, content: string): void {
     if (err instanceof ValidationError) {
       throw new ValidationError(`${path}: ${err.message}`);
     }
+    if (!isYamlParseError(err)) throw err;
     throw new ValidationError(
       `${path}: frontmatter YAML does not parse: ${(err as Error).message}`,
     );
@@ -79,5 +89,6 @@ export function refuseExecutableFrontmatter(path: string, content: string): void
     if (err instanceof ValidationError) {
       throw new ValidationError(`${path}: ${err.message}`);
     }
+    if (!isYamlParseError(err)) throw err;
   }
 }

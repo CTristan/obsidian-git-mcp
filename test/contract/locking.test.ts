@@ -35,9 +35,9 @@ describe('locking', () => {
 
     const shas = await fx.bareLog('%H', 2);
     expect(new Set(shas)).toEqual(new Set([commitShaOf(a), commitShaOf(b)]));
-    // Linear history: the newer commit's parent is the older one.
-    const parentOfHead = await git(['rev-parse', 'main~1'], fx.bareDir);
-    expect(shas[1]).toBe(parentOfHead);
+    // Linear history: the tip has exactly one parent, which is the other commit.
+    const parents = (await fx.bareLog('%P', 1))[0]!.split(' ');
+    expect(parents).toEqual([shas[1]]);
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });
 

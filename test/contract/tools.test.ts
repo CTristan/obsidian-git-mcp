@@ -92,7 +92,11 @@ describe('wrapper-added tools', () => {
   });
 
   it('list_recent_changes returns newest-first git history', async () => {
-    await callTool(srv.client, 'write_note', { path: 'Inbox/Newest.md', content: '# Newest\n' });
+    const write = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/Newest.md',
+      content: '# Newest\n',
+    });
+    expect(write.isError, `setup write failed: ${textOf(write)}`).toBeFalsy();
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 10 });
     expect(res.isError).toBeFalsy();
     const text = textOf(res);
@@ -103,10 +107,11 @@ describe('wrapper-added tools', () => {
   });
 
   it('list_recent_changes scopes history to a contained path and rejects traversal', async () => {
-    await callTool(srv.client, 'write_note', {
+    const write = await callTool(srv.client, 'write_note', {
       path: 'Inbox/Scoped.md',
       content: '# Scoped\n',
     });
+    expect(write.isError, `setup write failed: ${textOf(write)}`).toBeFalsy();
     const scoped = await callTool(srv.client, 'list_recent_changes', {
       path: 'Inbox/Scoped.md',
       limit: 10,
@@ -124,8 +129,13 @@ describe('wrapper-added tools', () => {
   });
 
   it('list_recent_changes truncates a fractional limit instead of erroring', async () => {
-    await callTool(srv.client, 'write_note', { path: 'Inbox/A.md', content: '# A\n' });
-    await callTool(srv.client, 'write_note', { path: 'Inbox/B.md', content: '# B\n' });
+    for (const [path, content] of [
+      ['Inbox/A.md', '# A\n'],
+      ['Inbox/B.md', '# B\n'],
+    ] as const) {
+      const write = await callTool(srv.client, 'write_note', { path, content });
+      expect(write.isError, `setup write ${path} failed: ${textOf(write)}`).toBeFalsy();
+    }
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 2.7 });
     expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
     // 2.7 floors to 2, so exactly the two newest commits are returned, newest first.
@@ -136,7 +146,11 @@ describe('wrapper-added tools', () => {
   });
 
   it('list_recent_changes clamps an explicit limit of 0 to the documented minimum of 1', async () => {
-    await callTool(srv.client, 'write_note', { path: 'Inbox/Newest.md', content: '# Newest\n' });
+    const write = await callTool(srv.client, 'write_note', {
+      path: 'Inbox/Newest.md',
+      content: '# Newest\n',
+    });
+    expect(write.isError, `setup write failed: ${textOf(write)}`).toBeFalsy();
     const res = await callTool(srv.client, 'list_recent_changes', { limit: 0 });
     expect(res.isError, `expected success, got: ${textOf(res)}`).toBeFalsy();
     const lines = textOf(res).trim().split('\n');

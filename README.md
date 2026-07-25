@@ -22,7 +22,7 @@ The full build-vs-wrap evaluation — why the server wraps MCPVault instead of f
 
 Not on npm yet, so install from source. You need Node ≥ 24, pnpm, and git ≥ 2.15 on `PATH`.
 
-Git ≥ 2.15 supplies `git status --no-optional-locks`, which the transaction wrapper runs before serving anything. The wrapper also relies on the `--porcelain=v1` status format from git 2.11 and `core.hooksPath` host-hook suppression from git 2.9. Contributing needs git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Git ≥ 2.15 supplies `git --no-optional-locks status`, which the transaction wrapper runs before serving anything. The wrapper also relies on the `--porcelain=v1` status format from git 2.11 and `core.hooksPath` host-hook suppression from git 2.9. Contributing needs git ≥ 2.32 for the test fixtures' `GIT_CONFIG_GLOBAL` isolation (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 pnpm isn't bundled with Node, so enable it via Corepack. Which command you run depends on your Node version, because Node 25 dropped the bundled Corepack that earlier versions ship:
 

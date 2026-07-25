@@ -192,6 +192,22 @@ describe('applyCloneDiff symlink safety', () => {
     expect(await readFile(join(outside, 'keep.md'), 'utf8')).toBe('# Keep\n');
   });
 
+  it('refuses a case-only rename when the filesystem resolves the destination casing differently', async () => {
+    await writeFile(join(vaultPath, 'Note.md'), 'before\n');
+    await writeFile(join(cloneDir, 'note.md'), 'after\n');
+    const entry = { size: 6n, mtimeNs: 2n, ino: 41n, isSymlink: false };
+    const before: Manifest = new Map([
+      ['Note.md', { ...entry, mtimeNs: 1n }],
+    ]);
+    const after: Manifest = new Map([['note.md', entry]]);
+
+    await expect(
+      applyCloneDiff(vaultPath, await realpath(vaultPath), cloneDir, before, after),
+    ).rejects.toThrow(/path changed during the write/);
+
+    expect(await readFile(join(vaultPath, 'Note.md'), 'utf8')).toBe('before\n');
+  });
+
   it('removes now-empty parent directories after cascading deletes', async () => {
     // Deleting every file under a nested subtree should carry the now-empty intermediate dirs
     // out of the live vault too, but stop at the first non-empty ancestor and never touch the
@@ -469,6 +485,21 @@ describe('writeAllAt short-write resilience', () => {
     expect(Buffer.compare(landed, payload)).toBe(0);
     // The forced short first write means writeAllAt had to issue at least one more call.
     expect(calls).toBeGreaterThan(1);
+  });
+
+  it('throws after one call when a write reports zero bytes', async () => {
+    let calls = 0;
+    const fakeHandle = {
+      write: async (buffer: Buffer) => {
+        calls++;
+        return { bytesWritten: 0, buffer };
+      },
+    } as unknown as FileHandle;
+
+    await expect(writeAllAt(fakeHandle, Buffer.from('x'))).rejects.toThrow(
+      /write made no progress/,
+    );
+    expect(calls).toBe(1);
   });
 });
 

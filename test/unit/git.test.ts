@@ -188,6 +188,22 @@ describe('runGit host execution-vector neutralization', () => {
     expect(existsSync(markerPath)).toBe(false);
   });
 
+  it('neutralizes diff.external even when format-patch explicitly enables external diffs', async () => {
+    await writeFile(
+      globalConfig,
+      `[user]\n\tname = Probe\n\temail = probe@test.local\n[commit]\n\tgpgsign = false\n[diff]\n\texternal = ${probePath}\n`,
+    );
+    await writeFile(join(dir, 'note.md'), 'before\n');
+    await runGit(['add', 'note.md'], dir, { env: isolatedGitEnv(globalConfig) });
+    await runGit(['commit', '-m', 'seed'], dir, { env: isolatedGitEnv(globalConfig) });
+
+    await runGit(['format-patch', '--stdout', '--ext-diff', '-1'], dir, {
+      env: isolatedGitEnv(globalConfig),
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
   it('does not run a filter command selected by host attributes and config', async () => {
     const attributesPath = join(probeDir, 'attributes');
     await writeFile(attributesPath, '*.md filter=probe\n');

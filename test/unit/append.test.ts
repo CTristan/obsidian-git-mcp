@@ -79,6 +79,32 @@ describe('appendToSection', () => {
     expect(appendToSection(note, 'Log', '- two')).toBe(expected);
   });
 
+  it('masks headings inside a fenced code block opened by a list item', () => {
+    const note = [
+      '## Log',
+      '- ```',
+      '  ## Fake',
+      '  ```',
+      '- one',
+      '## Next',
+      '- stuff',
+      '',
+    ].join('\n');
+    const expected = [
+      '## Log',
+      '- ```',
+      '  ## Fake',
+      '  ```',
+      '- one',
+      '- two',
+      '## Next',
+      '- stuff',
+      '',
+    ].join('\n');
+
+    expect(appendToSection(note, 'Log', '- two')).toBe(expected);
+  });
+
   it('masks a "##" line inside a fenced code block in a CRLF note', () => {
     // Splitting a CRLF note on "\n" leaves every line with a trailing "\r", so the fence
     // matcher has to tolerate it — otherwise the fence never opens, the inner "## Fake"

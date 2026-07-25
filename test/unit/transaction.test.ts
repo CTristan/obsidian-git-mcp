@@ -320,19 +320,7 @@ describe('Transactor clearDeadLock TOCTOU', () => {
     // transaction. Reproduce that torn write through the old open+handle seam; the atomic
     // publish never uses it (it writes a full temp file and hard-links it in), so lockPath
     // always carries this live process's complete pid and a peer clearDeadLock must refuse.
-    const actualFs = await vi.importActual<typeof fsPromises>('node:fs/promises');
     const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
-
-    vi.mocked(fsPromises.open).mockImplementation((async (path: string, ...args: unknown[]) => {
-      const realOpen = actualFs.open as (p: string, ...a: unknown[]) => Promise<fsPromises.FileHandle>;
-      const handle = await realOpen(path, ...args);
-      if (path === lockPath) {
-        handle.writeFile = (async () => {
-          await actualFs.writeFile(lockPath, 'pid ');
-        }) as typeof handle.writeFile;
-      }
-      return handle;
-    }) as unknown as typeof fsPromises.open);
 
     try {
       await makeTransactor(fx)['acquireLock']();
