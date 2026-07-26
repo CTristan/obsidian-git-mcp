@@ -193,8 +193,8 @@ function splitLeadingGlobalOptions(args: string[]): {
 }
 
 /**
- * Finds execution-capable repository configuration and returns overrides that disable it.
- * Transport commands are refused because an empty override would still change Git behavior.
+ * Finds execution-capable repository configuration, disabling safe entries and refusing
+ * transport-command configuration that cannot be neutralized without changing behavior.
  */
 async function configuredExecutionOverrides(
   cwd: string,

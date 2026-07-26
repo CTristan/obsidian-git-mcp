@@ -207,7 +207,7 @@ export class Transactor {
     this.lockPath = join(cfg.vaultPath, '.git', 'obsidian-git-mcp.lock');
   }
 
-  /** Runs one hardened Git command and exposes its settled argument list to the test hook. */
+  /** Runs one hardened Git command and exposes its requested arguments to the test hook. */
   private async git(args: string[], options?: GitOptions): Promise<string> {
     try {
       return await runGit(args, this.cfg.vaultPath, {
@@ -279,7 +279,7 @@ export class Transactor {
 
   /**
    * Publishes a complete PID-bearing lock through an atomic hard link, refusing an existing
-   * holder without exposing an empty or partially written lockfile.
+   * lock path without exposing an empty or partially written lockfile.
    */
   private async acquireLock(): Promise<void> {
     // Publish the lock atomically. Writing the pid to a private staging file and hard-linking
@@ -446,7 +446,7 @@ export class Transactor {
     await unlink(claimPath).catch(() => {});
   }
 
-  /** Treats permission-denied process probes as live and only `ESRCH` as a dead holder. */
+  /** Treats `EPERM` as live, `ESRCH` as dead, and propagates unknown probe failures. */
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
@@ -455,7 +455,10 @@ export class Transactor {
       // EPERM means the pid exists but belongs to another user/permission domain — still
       // alive, so keep refusing rather than clearing a live holder's lock. Only ESRCH
       // (no such process) means dead.
-      return (err as NodeJS.ErrnoException).code === 'EPERM';
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EPERM') return true;
+      if (code === 'ESRCH') return false;
+      throw err;
     }
   }
 

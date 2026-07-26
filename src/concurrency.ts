@@ -48,7 +48,7 @@ export class Semaphore {
     this.available = permits;
   }
 
-  /** Runs one holder and returns its permit even when the holder rejects. */
+  /** Runs one holder and releases its permit even when the holder rejects. */
   async run<R>(fn: () => Promise<R>): Promise<R> {
     await this.acquire();
     try {

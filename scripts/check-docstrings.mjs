@@ -276,7 +276,7 @@ function scanProject(root) {
 function reportFor(declarations) {
   const documented = declarations.filter((declaration) => declaration.documented).length;
   const total = declarations.length;
-  const percentage = total === 0 ? 100 : Number(((documented / total) * 100).toFixed(2));
+  const percentage = total === 0 ? 100 : (documented / total) * 100;
   return {
     documented,
     missing: declarations
@@ -289,9 +289,8 @@ function reportFor(declarations) {
 
 function printText(report, threshold) {
   process.stdout.write(
-    `Docstring coverage: ${report.documented}/${report.total} (${report.percentage.toFixed(
-      2,
-    )}%), required ${threshold.value.toFixed(2)}%\n`,
+    `Docstring coverage: ${report.documented}/${report.total} (${report.percentage}%), ` +
+      `required ${threshold.value}%\n`,
   );
   if (report.missing.length === 0) return;
   process.stdout.write('Missing docstrings:\n');

@@ -53,6 +53,17 @@ async function check(
   return { report: JSON.parse(stdout) as CheckerReport, stderr };
 }
 
+async function checkText(root: string, threshold: number): Promise<string> {
+  const { stdout } = await execFileAsync(process.execPath, [
+    checker,
+    '--root',
+    root,
+    '--threshold',
+    String(threshold),
+  ]);
+  return stdout;
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -135,6 +146,21 @@ describe('docstring coverage checker', () => {
       report: { documented: 4, total: 5, percentage: 80 },
     });
     await expect(check(root, 80.01)).rejects.toMatchObject({ code: 1 });
+  });
+
+  it('does not display a failing exact ratio as the threshold percentage', async () => {
+    const root = await fixture({
+      'src/sample.ts': [
+        '/** One. */ function one(): void {}',
+        '/** Two. */ function two(): void {}',
+        'function three(): void {}',
+      ].join('\n'),
+    });
+
+    await expect(checkText(root, 66.67)).rejects.toMatchObject({
+      code: 1,
+      stdout: expect.stringMatching(/2\/3 \(66\.666/),
+    });
   });
 
   it('passes an empty source tree with 100 percent coverage', async () => {
