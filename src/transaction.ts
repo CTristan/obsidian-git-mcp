@@ -39,6 +39,11 @@ export interface Identity {
   email: string;
 }
 
+/**
+ * Server composition details for the internal transaction primitive.
+ *
+ * @internal
+ */
 export interface TransactorConfig {
   vaultPath: string;
   branch: string;
@@ -160,10 +165,18 @@ function assertSafeIdentity(kind: 'collaborator' | 'service', identity: Identity
 
 /**
  * Serializes every vault mutation into a git transaction: lock → clean check → fetch →
- * fast-forward → mutate → validate → commit → push → SHA. Any failure restores the
- * pre-transaction checkout, because a write that didn't reach the remote never happened.
- * A mutation that creates a gitignored path is refused outright — git can neither stage
- * nor commit one, so letting the transaction "succeed" would drop that write silently.
+ * fast-forward → mutate → validate → commit → push → SHA.
+ *
+ * Supported server adapters must resolve their complete concrete mutation set and call
+ * `refuseIgnoredPaths()` immediately before the callback touches live content. Once the
+ * callback stays inside git's writable surface, a failure restores the pre-transaction
+ * checkout because a write that did not reach the remote never happened.
+ *
+ * `ignoredFingerprint()` only diagnoses a breach of that preflight invariant after live
+ * mutation. It cannot restore pre-existing ignored bytes, so arbitrary direct callbacks
+ * outside the server adapters are unsupported.
+ *
+ * @internal
  */
 export class Transactor {
   private chain: Promise<unknown> = Promise.resolve();

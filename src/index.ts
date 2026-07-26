@@ -9,8 +9,6 @@ export {
   IndeterminatePushError,
   LockError,
   TransactionError,
-  Transactor,
   type Identity,
-  type TransactorConfig,
 } from './transaction.js';
 export { ValidationError, validateNoteContent } from './validate.js';
