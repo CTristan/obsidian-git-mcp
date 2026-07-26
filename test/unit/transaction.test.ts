@@ -665,8 +665,9 @@ describe('Transactor ignored-file change signal', () => {
     expect(await git(['rev-parse', 'main'], fx.bareDir)).toBe(preRemote);
     expect(await git(['rev-parse', 'HEAD'], fx.serverDir)).toBe(preHead);
     expect(await fsPromises.readFile(trackedPath, 'utf8')).toBe(trackedBefore);
-    // Existing ignored bytes remain outside git's rollback surface; #11 tracks the
-    // separate snapshot-or-refusal design needed to restore them.
+    // This direct callback deliberately breaches the internal preflight requirement.
+    // The fingerprint diagnoses the breach, but existing ignored bytes remain outside
+    // git's rollback surface and prove why supported server writes must refuse first.
     expect(await fsPromises.readFile(ignoredPath, 'utf8')).toBe('# Private\n\nmutated\n');
     expect(await git(['status', '--porcelain'], fx.serverDir)).toBe('');
   });

@@ -349,6 +349,28 @@ describe('transaction safety', () => {
     expect(postContent).toBe(original);
   });
 
+  it('append_to_section refuses a pre-existing gitignored file before mutation', async () => {
+    await fx.collabWrite('.gitignore', 'private/\n', 'collab: ignore private/');
+
+    srv = await startServer(fx);
+    const ignoredPath = join(fx.serverDir, 'private', 'notes.md');
+    const original = '# Notes\n\n## Log\n\n- original\n';
+    await mkdir(join(fx.serverDir, 'private'), { recursive: true });
+    await writeFile(ignoredPath, original);
+
+    const { preHead, preRemote } = await snapshot(fx);
+    const res = await callTool(srv.client, 'append_to_section', {
+      path: 'private/notes.md',
+      heading: 'Log',
+      text: '- mutated',
+    });
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res).toLowerCase()).toContain('gitignore');
+    await expectRolledBack(fx, preRemote, preHead);
+    await expect(readFile(ignoredPath, 'utf8')).resolves.toBe(original);
+  });
+
   it('a write that only creates a newly-gitignored file is refused, not left on disk', async () => {
     // A benign-named note under a gitignored dir passes the path filter (no .obsidian/ or
     // traversal), but git can neither stage nor commit it. The transaction must refuse and
