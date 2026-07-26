@@ -39,6 +39,13 @@ export interface Identity {
   email: string;
 }
 
+export interface ReadSnapshot {
+  /** HEAD captured after the read's fetch/fast-forward step. */
+  headSha: string;
+  /** Worktree state captured under the same lock as the read. */
+  dirty: boolean;
+}
+
 /**
  * Server composition details for the internal transaction primitive.
  *
@@ -651,7 +658,9 @@ export class Transactor {
    * trade-off is that a read can now fail with a LockError while a peer process is
    * writing, rather than silently observing a half-applied tree.
    */
-  readTransaction<T>(read: () => Promise<T>): Promise<{ headSha: string; result: T }> {
+  readTransaction<T>(
+    read: (snapshot: ReadSnapshot) => Promise<T>,
+  ): Promise<{ headSha: string; result: T }> {
     return this.enqueue(async () => {
       this.invalidateGitExecutionConfig();
       // acquireLock sits outside the try (same invariant as transact()): a failed acquire
@@ -677,7 +686,10 @@ export class Transactor {
         // a note it landed must still clear this check before the next read touches it.
         await this.refuseUnvalidatedFetchedNotes();
         const headSha = await this.git(['rev-parse', 'HEAD']);
-        const result = await read();
+        // The wikilink index may only cache a HEAD while its tracked worktree is clean.
+        // Capture both facts under this lock so another process cannot mutate between them.
+        const dirty = await this.isDirty();
+        const result = await read({ headSha, dirty });
         return { headSha, result };
       } finally {
         await this.releaseLock();

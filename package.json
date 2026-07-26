@@ -29,7 +29,8 @@
   "dependencies": {
     "@bitbonsai/mcpvault": "0.12.1",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "gray-matter": "4.0.3"
+    "gray-matter": "4.0.3",
+    "mdast-util-from-markdown": "2.0.3"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
