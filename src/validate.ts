@@ -8,13 +8,10 @@ export class ValidationError extends Error {
 // setext heading underline), so flagging it alone would reject real notes.
 const CONFLICT_MARKERS = [/^<{7,}(?:[ \t]|$)/m, /^>{7,}(?:[ \t]|$)/m];
 
-// gray-matter's js/javascript engines evaluate the frontmatter body in-process, so a note
-// tagged "---js" is remote code execution the moment it's parsed — and we parse every
-// changed file, including ones just fetched from the remote. Disable those engines by
-// throwing from them; gray-matter's yaml/json engines stay untouched, and its yaml engine
-// uses js-yaml safe-load (the !!js/function tag is rejected, not constructed), so YAML is
-// the only executable-frontmatter surface and it's closed. Exact-pinned gray-matter means
-// js/javascript are the complete set of code-executing default engines to cover here.
+/**
+ * Replaces gray-matter's executable frontmatter engines with a path-independent refusal.
+ * The caller adds the note path when it classifies the resulting `ValidationError`.
+ */
 const refuseEngine = (lang: string) => () => {
   // A ValidationError (not a plain Error) so validateNoteContent can tell a security
   // refusal apart from a genuine YAML parse failure and report it as what it is.
@@ -33,6 +30,7 @@ function parseWithSafeEngines(content: string): void {
   matter(content, { engines: SAFE_ENGINES });
 }
 
+/** Identifies gray-matter's YAML parser failures without swallowing other engine errors. */
 function isYamlParseError(err: unknown): boolean {
   return (
     typeof err === 'object' &&

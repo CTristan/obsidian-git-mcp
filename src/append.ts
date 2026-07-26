@@ -20,14 +20,10 @@ const HEADING = /^ {0,3}(#{1,6})(?:\s+(.+?))?(?:\s+#+)?\s*$/;
 // backtick-info-string opener check or the whitespace-only closer check either.
 const FENCE = /^ {0,3}((?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})([^\r]*)\r?$/;
 
-// A fenced code block can contain a line that looks like a heading (e.g. a "## Log"
-// line inside a ``` example); both scans below need to ignore those, so this returns,
-// per line, whether it sits inside an (unclosed) fence.
-//
-// Per CommonMark, a fence opened with a run of N backticks (or tildes) is closed only
-// by a line whose leading run is the same character and at least N long — a narrower or
-// different-character run inside the fence (e.g. a 3-backtick line documenting fence
-// syntax inside a 4-backtick fence) must not close it.
+/**
+ * Marks lines inside CommonMark fences so heading scans cannot treat code examples as
+ * sections. A fence closes only with the same marker and at least the opening run length.
+ */
 function fenceMask(
   lines: readonly string[],
 ): { mask: boolean[]; endsOpen: boolean; openFenceAt: number } {
