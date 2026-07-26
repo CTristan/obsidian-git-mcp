@@ -9,7 +9,7 @@ An MCP server for git-backed Obsidian vaults. Every write an AI collaborator mak
 - Rolls the checkout back to its pre-transaction state when any step fails, so a failed write leaves nothing behind.
 - Refuses conflicting concurrent edits instead of guessing a merge. A push race with a non-conflicting remote commit retries a bounded number of times; an actual conflict stops immediately.
 - Attributes each commit to the collaborator that made it, so `git log --author=ChatGPT` is the audit trail. The service itself stays the committer.
-- Adds the git-aware tools MCPVault doesn't have: `vault_status`, `list_recent_changes`, and `append_to_section`.
+- Adds the wrapper-native tools MCPVault doesn't have: `vault_status`, `list_recent_changes`, `append_to_section`, `resolve_wikilink`, and `get_backlinks`.
 - Ships destructive tools (`delete_note`, `move_note`, `move_file`) disabled by default, and denies `.obsidian/` writes and path traversal at both the path-filter and transaction layers.
 
 ## Why create this?
@@ -80,4 +80,24 @@ Two tool behaviors worth knowing before you write:
 - `update_frontmatter` preserves sibling keys and their data but normalizes flow-style whitespace (`[project]` becomes `[ project ]`), so frontmatter updates are semantically targeted, not byte-targeted. The note body stays byte-identical.
 - `patch_note` is exact-string replace (`oldString`/`newString`), not heading-targeted. That works well in practice, because agents read a note before editing it, and reproducing exact bytes is more reliable for them than heading arithmetic.
 
-`get_backlinks` and `resolve_wikilink` aren't implemented yet — they're tracked in [#2](https://github.com/CTristan/obsidian-git-mcp/issues/2).
+`resolve_wikilink` accepts one complete `[[wikilink]]` (or `![[embed]]`) and an optional exact
+`sourcePath`. The source path resolves same-note links such as `[[#Status]]` and lets an unqualified
+`[[Target]]` select `Target.md` beside its source. The result separates the resolved path, validated
+heading or block, and display alias:
+
+```json
+{
+  "path": "Projects/Alpha.md",
+  "subpath": { "type": "heading", "value": "Status" },
+  "alias": "project status"
+}
+```
+
+`get_backlinks` accepts an exact tracked note path and returns the unique source-note paths whose
+wikilinks resolve to it. A broken heading or block still counts as a note-level backlink, because
+its file destination remains `Projects/Alpha.md`.
+
+Resolution refuses duplicate filenames when the source directory or a unique path suffix cannot
+settle them. This is deliberately stricter than guessing which note Obsidian might rank first,
+because the wrong note is worse than an actionable ambiguity error. The full boundary is recorded
+in [ADR 0003](docs/decisions/0003-resolve-wikilinks-conservatively.md).

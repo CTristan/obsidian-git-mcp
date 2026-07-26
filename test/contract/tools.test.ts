@@ -47,6 +47,8 @@ describe('wrapper-added tools', () => {
       'vault_status',
       'list_recent_changes',
       'append_to_section',
+      'resolve_wikilink',
+      'get_backlinks',
     ]);
     const { tools } = await srv.client.listTools();
     const listed = new Set(tools.map((tool) => tool.name));

@@ -920,6 +920,22 @@ describe('Transactor.readTransaction cross-process locking', () => {
     const second = await transactor.readTransaction(async () => 'second');
     expect(second.result).toBe('second');
   });
+
+  it('captures HEAD and dirty state inside the locked read snapshot', async () => {
+    const transactor = makeTransactor(fx);
+    const clean = await transactor.readTransaction(async (snapshot) => snapshot);
+    expect(clean.result).toEqual({
+      headSha: await git(['rev-parse', 'HEAD'], fx.serverDir),
+      dirty: false,
+    });
+    expect(clean.headSha).toBe(clean.result.headSha);
+
+    await writeFile(join(fx.serverDir, 'Inbox', 'Dirty.md'), '# Dirty\n');
+    const dirty = await transactor.readTransaction(async (snapshot) => snapshot);
+    expect(dirty.headSha).toBe(dirty.result.headSha);
+    expect(dirty.result.headSha).toBe(clean.result.headSha);
+    expect(dirty.result.dirty).toBe(true);
+  });
 });
 
 describe('Transactor.changedPaths rename parsing', () => {

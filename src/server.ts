@@ -14,6 +14,8 @@ import {
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { appendToSection } from './append.js';
+import { mapWithConcurrency } from './concurrency.js';
+import { runGit } from './git.js';
 import { forbiddenPathReason } from './paths.js';
 import {
   applyCloneDiff,
@@ -23,8 +25,14 @@ import {
   openPinnedHandle,
   writeAllAt,
 } from './staging.js';
-import { Transactor, type Identity } from './transaction.js';
+import { Transactor, type Identity, type ReadSnapshot } from './transaction.js';
 import { refuseExecutableFrontmatter, validateNoteContent, ValidationError } from './validate.js';
+import {
+  backlinksFor,
+  createWikilinkIndex,
+  resolveWikilink,
+  type WikilinkIndex,
+} from './wikilinks.js';
 
 // Single source of truth for the reported version: read it from package.json at load
 // rather than duplicating the literal. `../package.json` resolves the same from both src/
@@ -58,6 +66,7 @@ function isFrontmatterParsedFile(path: string): boolean {
 // (JSON) or .base (YAML) file isn't a coherent operation, so this tool stays markdown-only
 // regardless of what MCPVault will parse frontmatter on.
 const MARKDOWN_NOTE_EXTENSIONS = ['.md', '.markdown'];
+const WIKILINK_INDEX_READ_CONCURRENCY = 64;
 
 function isMarkdownNote(path: string): boolean {
   const lower = path.toLowerCase();
@@ -110,6 +119,33 @@ const WRAPPER_TOOLS: Tool[] = [
         text: { type: 'string', description: 'Text to append' },
       },
       required: ['path', 'heading', 'text'],
+    },
+  },
+  {
+    name: 'resolve_wikilink',
+    description:
+      'Resolve one complete Obsidian [[wikilink]] to a tracked vault note, including a validated heading or block reference.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        link: { type: 'string', description: 'One complete [[wikilink]] or ![[embed]]' },
+        sourcePath: {
+          type: 'string',
+          description: 'Exact vault-relative source note path for same-note or duplicate resolution',
+        },
+      },
+      required: ['link'],
+    },
+  },
+  {
+    name: 'get_backlinks',
+    description: 'List tracked notes whose Obsidian wikilinks resolve to the target note.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Exact vault-relative target note path' },
+      },
+      required: ['path'],
     },
   },
 ];
@@ -468,6 +504,59 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     return undefined;
   };
 
+  let wikilinkCache: { headSha: string; index: WikilinkIndex } | undefined;
+  const buildWikilinkIndex = async (): Promise<WikilinkIndex> => {
+    // The canonical vault is its tracked git tree. Ignored and untracked Markdown can
+    // change without advancing HEAD, so including either would make a clean-HEAD cache stale.
+    const [listed, deleted] = await Promise.all([
+      runGit(['ls-files', '-z', '--'], vaultPath),
+      runGit(['ls-files', '-z', '--deleted', '--'], vaultPath),
+    ]);
+    const deletedPaths = new Set(deleted.split('\0').filter((path) => path !== ''));
+    const paths = listed
+      .split('\0')
+      .filter(
+        (path) => path !== '' && isMarkdownNote(path) && !deletedPaths.has(path),
+      )
+      .sort();
+    const notes = await mapWithConcurrency(
+      paths,
+      WIKILINK_INDEX_READ_CONCURRENCY,
+      async (path) => {
+        try {
+          const reason = await readPathReason(path);
+          if (reason) throw new InnerToolError(reason);
+          return { path, content: await readFile(resolve(vaultPath, path), 'utf8') };
+        } catch (err) {
+          if (err instanceof InnerToolError) throw err;
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw err;
+        }
+      },
+    );
+    return createWikilinkIndex(notes.filter((note) => note !== undefined));
+  };
+
+  const wikilinkIndexFor = async (snapshot: ReadSnapshot): Promise<WikilinkIndex> => {
+    if (!snapshot.dirty && wikilinkCache?.headSha === snapshot.headSha) {
+      return wikilinkCache.index;
+    }
+    const index = await buildWikilinkIndex();
+    if (!snapshot.dirty) {
+      wikilinkCache = { headSha: snapshot.headSha, index };
+    }
+    return index;
+  };
+
+  const indexedRead = async <T>(
+    read: (index: WikilinkIndex) => T,
+  ): Promise<CallToolResult> => {
+    const { headSha, result } = await transactor.readTransaction(async (snapshot) =>
+      read(await wikilinkIndexFor(snapshot)),
+    );
+    return textResult(JSON.stringify(result, null, 2), { headSha });
+  };
+
   const forwardWrite = async (
     name: string,
     args: Record<string, unknown>,
@@ -648,6 +737,30 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       }
       if (name === 'append_to_section') {
         return await appendTool(args);
+      }
+      if (name === 'resolve_wikilink') {
+        const link = stringArg(args, 'link');
+        if (!link.trim()) {
+          return errorResult('link is required and must be non-empty');
+        }
+        const sourcePath = stringArg(args, 'sourcePath', undefined);
+        if (sourcePath !== undefined) {
+          const reason = await readPathReason(sourcePath);
+          if (reason) return errorResult(reason);
+        }
+        return await indexedRead((index) => resolveWikilink(index, link, sourcePath));
+      }
+      if (name === 'get_backlinks') {
+        const path = stringArg(args, 'path');
+        if (!path) {
+          return errorResult('path is required and must be non-empty');
+        }
+        const reason = await readPathReason(path);
+        if (reason) return errorResult(reason);
+        return await indexedRead((index) => ({
+          path,
+          backlinks: backlinksFor(index, path),
+        }));
       }
       if (DESTRUCTIVE_TOOLS.has(name)) {
         if (!allowDestructive) {
