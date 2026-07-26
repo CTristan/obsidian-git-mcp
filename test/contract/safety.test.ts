@@ -358,7 +358,7 @@ describe('transaction safety', () => {
     await mkdir(join(fx.serverDir, 'private'), { recursive: true });
     await writeFile(ignoredPath, original);
 
-    const { preHead, preRemote } = await snapshot(fx);
+    const preRemote = await fx.bareHead();
     const res = await callTool(srv.client, 'append_to_section', {
       path: 'private/notes.md',
       heading: 'Log',
@@ -367,7 +367,8 @@ describe('transaction safety', () => {
 
     expect(res.isError).toBe(true);
     expect(textOf(res).toLowerCase()).toContain('gitignore');
-    await expectRolledBack(fx, preRemote, preHead);
+    expect(await fx.bareHead()).toBe(preRemote);
+    await expectCleanCheckout(fx);
     await expect(readFile(ignoredPath, 'utf8')).resolves.toBe(original);
   });
 
