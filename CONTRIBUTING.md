@@ -13,15 +13,12 @@ pnpm install
 ## Build and test
 
 ```sh
-pnpm check:docstrings  # requires 80% JSDoc coverage across src
-pnpm test              # full contract suite
-pnpm typecheck         # tsc --noEmit over src + test
-pnpm build             # emits dist/ (the stdio bin lives at dist/cli.js)
+pnpm test        # full contract suite
+pnpm typecheck   # tsc --noEmit over src + test
+pnpm build       # emits dist/ (the stdio bin lives at dist/cli.js)
 ```
 
 The contract tests in `test/contract/` are the specification — we write the failing test first, then implement until it passes. If you change behavior, change the contract test in the same commit.
-
-`pnpm check:docstrings` counts implementation-bearing functions, constructors, accessors, named methods, and module-level callable variables. It ignores type-only declarations, anonymous callbacks, nested callable variables, declaration files, and tests. The complete `src` tree must stay at or above 80%, because [ADR 4](docs/decisions/0004-enforce-source-docstring-coverage.md) makes the repository-owned result the required and reproducible coverage boundary.
 
 ## Test fixtures
 

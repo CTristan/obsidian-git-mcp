@@ -212,7 +212,6 @@ function stringArg(
   return fallback.length > 0 ? fallback[0] : '';
 }
 
-/** Builds the attributed commit summary for one forwarded write tool invocation. */
 function commitMessageFor(tool: string, args: Record<string, unknown>): string {
   if (tool === 'move_note' || tool === 'move_file') {
     return `${tool}: ${stringArg(args, 'oldPath')} -> ${stringArg(args, 'newPath')}`;
@@ -367,10 +366,12 @@ function containmentReason(realRoot: string, resolved: string): string | undefin
     : 'refusing to follow a symlink outside the vault';
 }
 
-/**
- * Resolves every write destination against its actual filesystem target and refuses paths
- * that escape the selected root or enter a restricted segment.
- */
+// Resolves every write-path arg to where it would actually land on disk and refuses one
+// that escapes `root` or hits a restricted segment. We run it against the staged clone
+// before the delegated write and against the live vault after it, so the two callers must
+// stay identical — a shared helper is the only way they can't drift. `root`/`realRoot`
+// parameterize which tree is being judged (the clone vs. the live vault); `swapContext`
+// tails the message so the post-write caller can name the race without duplicating the loop.
 async function assertWriteDestinationsContained(
   args: Record<string, unknown>,
   swapContext: string,
@@ -391,10 +392,6 @@ async function assertWriteDestinationsContained(
   }
 }
 
-/**
- * Creates the MCP wrapper around one live vault checkout. Delegated writes use disposable
- * staging clones behind transaction, validation, containment, read-index, and tool boundaries.
- */
 export async function createVaultServer(config: VaultServerConfig): Promise<VaultServer> {
   const vaultPath = resolve(config.vaultPath);
   const branch = config.branch ?? 'main';
@@ -798,11 +795,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   });
 
   return {
-    /** Connects the wrapper's public MCP server to the caller-provided transport. */
     async connect(transport: Transport): Promise<void> {
       await outer.connect(transport);
     },
-    /** Closes every inner and outer MCP resource before surfacing the first close failure. */
     async close(): Promise<void> {
       // Close everything even when one close rejects, then surface the first failure —
       // otherwise an early rejection leaks the remaining server/transport.

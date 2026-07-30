@@ -35,7 +35,6 @@ export interface ManifestEntry {
 /** Every file/symlink under a staged clone, keyed by clone-relative path. */
 export type Manifest = Map<string, ManifestEntry>;
 
-/** Returns every added, removed, or fingerprint-changed path across two staged manifests. */
 export function changedManifestPaths(before: Manifest, after: Manifest): string[] {
   const changed: string[] = [];
   for (const [rel, entry] of after) {
@@ -313,7 +312,6 @@ export async function openPinnedHandle(
   return handle;
 }
 
-/** Reports whether the platform must supply `O_NOFOLLOW` for a pinned file open. */
 export function requiresNoFollowFlag(
   platform: NodeJS.Platform,
   _noFollowFlag: number | undefined,

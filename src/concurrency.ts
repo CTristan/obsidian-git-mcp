@@ -48,7 +48,6 @@ export class Semaphore {
     this.available = permits;
   }
 
-  /** Runs one holder and releases its permit even when the holder rejects. */
   async run<R>(fn: () => Promise<R>): Promise<R> {
     await this.acquire();
     try {
@@ -58,7 +57,6 @@ export class Semaphore {
     }
   }
 
-  /** Takes an available permit or waits in FIFO order for a direct handoff. */
   private acquire(): Promise<void> {
     if (this.available > 0) {
       this.available--;
@@ -69,7 +67,6 @@ export class Semaphore {
     });
   }
 
-  /** Transfers a permit to the oldest waiter, or returns it to the available pool. */
   private release(): void {
     const next = this.waiters.shift();
     // Hand the permit straight to the oldest waiter rather than bumping the count and letting it

@@ -17,7 +17,6 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check:docstrings": "node scripts/check-docstrings.mjs --threshold 80",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

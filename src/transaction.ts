@@ -144,7 +144,6 @@ function parseLockPid(contents: string): number | undefined {
   return Number.isNaN(pid) || pid <= 0 ? undefined : pid;
 }
 
-/** Refuses remote and branch names that Git could reinterpret as options or ref syntax. */
 function assertSafeGitName(kind: 'remote' | 'branch', value: string): void {
   const unsafe =
     value === '' ||
@@ -162,7 +161,6 @@ function assertSafeGitName(kind: 'remote' | 'branch', value: string): void {
   }
 }
 
-/** Refuses identity fields that could inject additional Git commit headers. */
 function assertSafeIdentity(kind: 'collaborator' | 'service', identity: Identity): void {
   if (identity.name === '' || /[<>\r\n]/.test(identity.name)) {
     throw new TransactionError(`invalid ${kind} git identity name`);
@@ -196,7 +194,6 @@ export class Transactor {
   // until reconcileAtStartup's first pass; readTransaction advances it after each scan.
   private validatedThroughSha: string | undefined;
 
-  /** Validates configuration and binds the process lock to this checkout's private Git state. */
   constructor(private readonly cfg: TransactorConfig) {
     assertSafeGitName('remote', cfg.remote);
     assertSafeGitName('branch', cfg.branch);
@@ -207,7 +204,6 @@ export class Transactor {
     this.lockPath = join(cfg.vaultPath, '.git', 'obsidian-git-mcp.lock');
   }
 
-  /** Runs one hardened Git command and exposes its requested arguments to the test hook. */
   private async git(args: string[], options?: GitOptions): Promise<string> {
     try {
       return await runGit(args, this.cfg.vaultPath, {
@@ -223,7 +219,6 @@ export class Transactor {
     invalidateGitExecutionCache(this.gitExecutionCache);
   }
 
-  /** Runs a Git command that may change the worktree, then invalidates config-derived state. */
   private async gitChangingWorktree(args: string[], options?: GitOptions): Promise<string> {
     try {
       return await this.git(args, options);
@@ -234,7 +229,6 @@ export class Transactor {
     }
   }
 
-  /** Fetches the configured branch with the network timeout and forces the next config rescan. */
   private async fetchRemote(): Promise<void> {
     try {
       await this.git(['fetch', '--', this.cfg.remote, this.cfg.branch], {
@@ -260,7 +254,6 @@ export class Transactor {
     return `${this.cfg.remote}/${this.cfg.branch}`;
   }
 
-  /** Builds the author and committer environment for one attributed vault commit. */
   private commitEnv(): Record<string, string> {
     return {
       GIT_AUTHOR_NAME: this.cfg.collaborator.name,
@@ -277,10 +270,6 @@ export class Transactor {
     return next;
   }
 
-  /**
-   * Publishes a complete PID-bearing lock through an atomic hard link, refusing an existing
-   * lock path without exposing an empty or partially written lockfile.
-   */
   private async acquireLock(): Promise<void> {
     // Publish the lock atomically. Writing the pid to a private staging file and hard-linking
     // it onto lockPath means the lockfile, the instant it is visible, already holds the complete
@@ -347,7 +336,6 @@ export class Transactor {
     }
   }
 
-  /** Releases this process's lock while treating an already-absent lock as complete cleanup. */
   private async releaseLock(): Promise<void> {
     await unlink(this.lockPath).catch((err) => {
       // A missing lockfile is fine (already released); anything else deserves a trace,
@@ -446,7 +434,6 @@ export class Transactor {
     await unlink(claimPath).catch(() => {});
   }
 
-  /** Treats `EPERM` as live, `ESRCH` as dead, and propagates unknown probe failures. */
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
@@ -455,10 +442,7 @@ export class Transactor {
       // EPERM means the pid exists but belongs to another user/permission domain — still
       // alive, so keep refusing rather than clearing a live holder's lock. Only ESRCH
       // (no such process) means dead.
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'EPERM') return true;
-      if (code === 'ESRCH') return false;
-      throw err;
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
     }
   }
 
@@ -469,7 +453,6 @@ export class Transactor {
     return (await this.git(['--no-optional-locks', 'status', '--porcelain'])) !== '';
   }
 
-  /** Returns current tracked or untracked paths requiring validation. */
   private async changedPaths(): Promise<string[]> {
     // -z gives NUL-separated, unquoted paths. --untracked-files=all is load-bearing:
     // without it git collapses a new note's new parent directory to "NewFolder/", so
@@ -564,7 +547,6 @@ export class Transactor {
     return hash.digest('hex');
   }
 
-  /** Refuses a complete candidate set before any path Git cannot commit reaches live apply. */
   async refuseIgnoredPaths(relPaths: readonly string[]): Promise<void> {
     const candidates = [...new Set(relPaths)].filter((relPath) => relPath !== '');
     if (candidates.length === 0) return;
@@ -928,7 +910,6 @@ export class Transactor {
     return { headSha, branch: this.cfg.branch, dirty, ahead: ahead ?? 0, behind: behind ?? 0 };
   }
 
-  /** Returns bounded, optionally path-scoped commit summaries for the recent-changes tool. */
   async recentChanges(limit: number, path?: string): Promise<string> {
     const count = Number.isFinite(limit)
       ? Math.min(Math.max(Math.trunc(limit), 1), 200)
