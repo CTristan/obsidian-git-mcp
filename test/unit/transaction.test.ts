@@ -175,6 +175,30 @@ describe('Transactor.reconcileAtStartup', () => {
       killSpy.mockRestore();
     }
   });
+
+  it('propagates unexpected process.kill failures without clearing the holder lock', async () => {
+    const foreignPid = 424242;
+    const lockPath = join(fx.serverDir, '.git', 'obsidian-git-mcp.lock');
+    await writeFile(lockPath, `pid ${foreignPid}\n`);
+    const probeError = Object.assign(new Error('unexpected process probe failure'), {
+      code: 'EIO',
+    });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === foreignPid) throw probeError;
+      return true;
+    });
+
+    try {
+      const err: unknown = await makeTransactor(fx)
+        .reconcileAtStartup()
+        .catch((error: unknown) => error);
+
+      expect(err).toBe(probeError);
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 });
 
 describe('Transactor lockfile format round-trip', () => {

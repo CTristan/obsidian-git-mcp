@@ -71,6 +71,7 @@ function isMarkdownPath(path: string): boolean {
   return NOTE_EXTENSIONS.some((extension) => lower.endsWith(extension));
 }
 
+/** Removes a recognized note extension while preserving the path's original casing. */
 function stripNoteExtension(path: string): string {
   const lower = path.toLowerCase();
   for (const extension of NOTE_EXTENSIONS) {
@@ -81,6 +82,7 @@ function stripNoteExtension(path: string): string {
   return path;
 }
 
+/** Replaces non-newline bytes in one range so every later source offset stays stable. */
 function maskRange(content: string, start: number, end: number): string {
   return (
     content.slice(0, start) +
@@ -110,6 +112,7 @@ function maskFrontmatter(content: string): string {
   return content;
 }
 
+/** Reports whether an offset follows an odd-length run of escaping backslashes. */
 function isEscaped(value: string, offset: number): boolean {
   let slashes = 0;
   for (let index = offset - 1; index >= 0 && value[index] === '\\'; index--) {
@@ -118,6 +121,7 @@ function isEscaped(value: string, offset: number): boolean {
   return slashes % 2 === 1;
 }
 
+/** Collects code and HTML ranges where `%%` must remain literal rather than open a comment. */
 function commentProtectedRanges(tree: MarkdownNode): OffsetRange[] {
   const ranges: OffsetRange[] = [];
   const visit = (node: MarkdownNode): void => {
@@ -170,6 +174,7 @@ function maskObsidianComments(content: string, protectedRanges: readonly OffsetR
   return open === undefined ? result : maskRange(result, open, result.length);
 }
 
+/** Finds the first unescaped delimiter at or after `start`, returning `-1` when absent. */
 function findUnescaped(value: string, wanted: string, start = 0): number {
   for (let index = start; index < value.length; index++) {
     if (value[index] === wanted && !isEscaped(value, index)) return index;
@@ -177,6 +182,7 @@ function findUnescaped(value: string, wanted: string, start = 0): number {
   return -1;
 }
 
+/** Splits on unescaped separators without removing escapes from the resulting segments. */
 function splitUnescaped(value: string, separator: string): string[] {
   const parts: string[] = [];
   let start = 0;
@@ -194,6 +200,7 @@ function unescapeWikilinkText(value: string): string {
   return value.replace(/\\([\\|#[\]])/g, '$1');
 }
 
+/** Parses one wikilink body into its target, subpath, alias, and embed fields. */
 function parseWikilinkBody(raw: string, body: string, embed: boolean): ParsedWikilink | undefined {
   if (body.includes('[[') || body.includes(']]')) return undefined;
   const pipe = findUnescaped(body, '|');
@@ -225,6 +232,10 @@ function parseWikilinkBody(raw: string, body: string, embed: boolean): ParsedWik
   return { raw, target, subpath, alias, embed, headingSegments };
 }
 
+/**
+ * Scans normal Markdown text for complete Obsidian wikilinks, skipping escaped or malformed
+ * candidates without guessing where an unmatched link should end.
+ */
 function scanWikilinks(value: string): ParsedWikilink[] {
   const links: ParsedWikilink[] = [];
   for (let index = 0; index < value.length - 1; index++) {
@@ -262,12 +273,17 @@ function scanWikilinks(value: string): ParsedWikilink[] {
   return links;
 }
 
+/** Flattens the rendered text carried by a Markdown node and its descendants. */
 function nodeText(node: MarkdownNode): string {
   if (typeof node.value === 'string') return node.value;
   if (typeof node.alt === 'string') return node.alt;
   return (node.children ?? []).map(nodeText).join('');
 }
 
+/**
+ * Parses one tracked note into the headings, block identifiers, and resolvable links used by
+ * the vault index, excluding masked frontmatter and comments.
+ */
 function parseNote(note: VaultNote): IndexedNote {
   const withoutFrontmatter = maskFrontmatter(note.content);
   const initialTree = fromMarkdown(withoutFrontmatter) as MarkdownNode;
@@ -300,6 +316,10 @@ function parseNote(note: VaultNote): IndexedNote {
   return { ...note, headings, blocks, links };
 }
 
+/**
+ * Builds a deterministic note map plus every extensionless path suffix used for conservative
+ * target resolution.
+ */
 export function createWikilinkIndex(notes: readonly VaultNote[]): WikilinkIndex {
   const indexed = new Map<string, IndexedNote>();
   const notesBySuffix = new Map<string, IndexedNote[]>();
@@ -326,10 +346,12 @@ export function createWikilinkIndex(notes: readonly VaultNote[]): WikilinkIndex 
   return { notes: indexed, notesBySuffix };
 }
 
+/** Expands an extensionless note path to every supported Markdown extension. */
 function notePathVariants(path: string): string[] {
   return isMarkdownPath(path) ? [path] : NOTE_EXTENSIONS.map((extension) => `${path}${extension}`);
 }
 
+/** Returns the note at one exact path variant without applying suffix or proximity rules. */
 function exactNote(index: WikilinkIndex, path: string): IndexedNote | undefined {
   for (const variant of notePathVariants(path)) {
     const note = index.notes.get(variant);
@@ -338,6 +360,7 @@ function exactNote(index: WikilinkIndex, path: string): IndexedNote | undefined 
   return undefined;
 }
 
+/** Validates that an optional `sourcePath` names one exact indexed note. */
 function assertSourceNote(index: WikilinkIndex, sourcePath: string | undefined): IndexedNote | undefined {
   if (sourcePath === undefined) return undefined;
   const normalized = sourcePath.replaceAll('\\', '/');
@@ -350,6 +373,10 @@ function assertSourceNote(index: WikilinkIndex, sourcePath: string | undefined):
   return source;
 }
 
+/**
+ * Resolves one target through explicit path, same-directory, then unique-suffix evidence,
+ * returning ambiguity instead of ranking duplicates.
+ */
 function resolveTarget(
   index: WikilinkIndex,
   target: string,
@@ -388,6 +415,7 @@ function resolveTarget(
   throw new Error(`wikilink target is ambiguous: ${target} (${paths.join(', ')})`);
 }
 
+/** Checks that heading segments appear along one valid descendant path in document order. */
 function hasHeadingPath(note: IndexedNote, segments: readonly string[]): boolean {
   const matchesFrom = (headingIndex: number, segmentIndex: number): boolean => {
     if (segmentIndex === segments.length - 1) return true;
@@ -417,6 +445,7 @@ function hasHeadingPath(note: IndexedNote, segments: readonly string[]): boolean
   );
 }
 
+/** Requires the input to contain exactly one complete wikilink or embed and nothing else. */
 function parseCompleteWikilink(link: string): ParsedWikilink {
   const trimmed = link.trim();
   const parsed = scanWikilinks(trimmed);
@@ -426,6 +455,7 @@ function parseCompleteWikilink(link: string): ParsedWikilink {
   return parsed[0]!;
 }
 
+/** Resolves one complete wikilink and validates its heading or block subpath. */
 export function resolveWikilink(
   index: WikilinkIndex,
   link: string,
@@ -445,6 +475,10 @@ export function resolveWikilink(
   return { path: note.path, subpath: parsed.subpath, alias: parsed.alias };
 }
 
+/**
+ * Returns unique source notes whose file targets resolve to the requested indexed note.
+ * Broken subpaths still count because backlink identity is note-level.
+ */
 export function backlinksFor(index: WikilinkIndex, targetPath: string): string[] {
   const normalized = targetPath.replaceAll('\\', '/');
   const reason = forbiddenPathReason(normalized);

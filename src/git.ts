@@ -63,6 +63,10 @@ interface HardeningState {
 
 let hardeningState: HardeningState | undefined;
 
+/**
+ * Builds process-private Git hardening arguments once, including inert hook and attributes
+ * paths, so host configuration cannot execute code inside a vault command.
+ */
 function hardenedConfig(): string[] {
   if (hardeningState !== undefined) return hardeningState.args;
 
@@ -97,6 +101,7 @@ function hardenedConfig(): string[] {
   return args;
 }
 
+/** Removes inherited `GIT_*` state, then applies only the explicit command environment. */
 function gitEnv(overrides: Record<string, string> | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -124,6 +129,7 @@ const GLOBAL_OPTIONS_WITH_VALUE = new Set([
   '--super-prefix',
 ]);
 
+/** Refuses caller-supplied `-c` values that could undo the fixed hardening arguments. */
 function assertSafeConfigOverride(value: string): void {
   const separator = value.indexOf('=');
   const key = (separator === -1 ? value : value.slice(0, separator)).toLowerCase();
@@ -132,6 +138,10 @@ function assertSafeConfigOverride(value: string): void {
   }
 }
 
+/**
+ * Separates Git's leading global options from the subcommand without interpreting any
+ * subcommand arguments as configuration.
+ */
 function splitLeadingGlobalOptions(args: string[]): {
   global: string[];
   command: string | undefined;
@@ -182,6 +192,10 @@ function splitLeadingGlobalOptions(args: string[]): {
   return { global, command: undefined, remaining: [] };
 }
 
+/**
+ * Finds execution-capable repository configuration, disabling safe entries and refusing
+ * transport-command configuration that cannot be neutralized without changing behavior.
+ */
 async function configuredExecutionOverrides(
   cwd: string,
   env: NodeJS.ProcessEnv,
@@ -218,6 +232,10 @@ async function configuredExecutionOverrides(
   return overrides;
 }
 
+/**
+ * Reuses one execution-config probe until the checkout or relevant environment changes,
+ * clearing a rejected probe so a transient failure cannot poison later commands.
+ */
 async function cachedExecutionOverrides(
   cwd: string,
   env: NodeJS.ProcessEnv,
@@ -259,6 +277,7 @@ async function cachedExecutionOverrides(
   }
 }
 
+/** Forces diff-like commands to ignore configured external diff and text-conversion helpers. */
 function hardenCommandArgs(args: string[]): string[] {
   const { global, command, remaining: rest } = splitLeadingGlobalOptions(args);
   if (command === undefined) return args;
