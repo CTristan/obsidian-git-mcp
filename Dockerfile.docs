@@ -1,0 +1,26 @@
+FROM node:24-bookworm-slim AS build
+
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json ./
+RUN pnpm install --frozen-lockfile
+COPY src ./src
+RUN pnpm build
+
+FROM node:24-bookworm-slim AS runtime
+
+ENV CANARY_BASE_URL=https://vault-poc.hemocode.dev \
+    CANARY_PORT=3000 \
+    CANARY_ROOT=/app \
+    NODE_ENV=production
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile
+COPY --from=build /app/dist ./dist
+COPY README.md CONTRIBUTING.md ./
+COPY docs ./docs
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+CMD ["node", "dist/canary/cli.js"]

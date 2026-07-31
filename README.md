@@ -101,3 +101,27 @@ Resolution refuses duplicate filenames when the source directory or a unique pat
 settle them. This is deliberately stricter than guessing which note Obsidian might rank first,
 because the wrong note is worse than an actionable ambiguity error. The full boundary is recorded
 in [ADR 0003](docs/decisions/0003-resolve-wikilinks-conservatively.md).
+
+## Running the public documentation service
+
+The repository also includes a read-only Streamable HTTP MCP endpoint for the project's public documentation. It exposes only the standard `search` and `fetch` tools, so it never loads a private vault or runs a git write transaction.
+
+Build the repository, then start the service from the repository root:
+
+```sh
+pnpm build
+CANARY_BASE_URL=http://127.0.0.1:3000 pnpm start:docs
+```
+
+Connect MCP Inspector to `http://127.0.0.1:3000/mcp`. The service also provides `/healthz`, citation pages under `/notes/`, and the privacy, terms, and support pages required by the published endpoint.
+
+Production configuration comes from environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CANARY_PORT` | `3000` | HTTP listener port |
+| `CANARY_BASE_URL` | local listener URL | Public origin used for citation URLs |
+| `CANARY_ALLOWED_HOSTS` | hostname from `CANARY_BASE_URL` | Comma-separated `Host` header allowlist |
+| `CANARY_ROOT` | current directory | Repository root containing the allowlisted Markdown files |
+| `CANARY_SUPPORT_URL` | project issue tracker | Public support destination |
+| `OPENAI_APPS_CHALLENGE` | unset | Exact domain-verification token served from the well-known route |

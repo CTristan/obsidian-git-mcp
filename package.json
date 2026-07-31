@@ -9,7 +9,8 @@
     "node": ">=24"
   },
   "bin": {
-    "obsidian-git-mcp": "./dist/cli.js"
+    "obsidian-git-mcp": "./dist/cli.js",
+    "obsidian-git-mcp-docs": "./dist/canary/cli.js"
   },
   "exports": "./dist/index.js",
   "files": [
@@ -18,8 +19,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check:docstrings": "node scripts/check-docstrings.mjs --threshold 80",
+    "start:docs": "node dist/canary/cli.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:docs": "vitest run test/canary"
   },
   "packageManager": "pnpm@10.20.0",
   "pnpm": {
@@ -31,9 +34,11 @@
     "@bitbonsai/mcpvault": "0.12.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "gray-matter": "4.0.3",
-    "mdast-util-from-markdown": "2.0.3"
+    "mdast-util-from-markdown": "2.0.3",
+    "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/express": "5.0.6",
     "@types/node": "26.1.1",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
