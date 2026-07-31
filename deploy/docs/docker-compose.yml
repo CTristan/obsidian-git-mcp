@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile.docs
     container_name: obsidian-git-mcp-docs
     environment:
-      CANARY_ALLOWED_HOSTS: vault-poc.hemocode.dev
+      CANARY_ALLOWED_HOSTS: vault-poc.hemocode.dev,127.0.0.1,localhost
       CANARY_BASE_URL: https://vault-poc.hemocode.dev
       CANARY_PORT: "3000"
       OPENAI_APPS_CHALLENGE: ${OPENAI_APPS_CHALLENGE:-}
