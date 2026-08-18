@@ -34,6 +34,9 @@ export interface VaultOperationRecord {
   createdAt: string;
   expiresAt: string;
   status: VaultOperationStatus;
+  startedAt?: string;
+  completedAt?: string;
+  commitSha?: string;
   result?: CallToolResult;
   error?: string;
 }

@@ -365,7 +365,13 @@ function normalizePreparedChange(args: Record<string, unknown>): {
 }
 
 /** Removes executable arguments and internal fields from a public operation response. */
+function recordedCommitSha(record: VaultOperationRecord): string | undefined {
+  const commitSha = record.commitSha ?? String((record.result?._meta ?? {})['commitSha'] ?? '');
+  return commitSha || undefined;
+}
+
 function publicOperation(record: VaultOperationRecord): Record<string, unknown> {
+  const commitSha = recordedCommitSha(record);
   return {
     requestId: record.requestId,
     operation: record.operation,
@@ -376,8 +382,20 @@ function publicOperation(record: VaultOperationRecord): Record<string, unknown> 
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
     status: record.status,
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    commitSha,
     error: record.error,
   };
+}
+
+/** Returns the same public receipt from execution, replay, and status lookup. */
+function operationResult(record: VaultOperationRecord): CallToolResult {
+  const commitSha = recordedCommitSha(record);
+  return textResult(
+    JSON.stringify(publicOperation(record), null, 2),
+    commitSha ? { commitSha } : undefined,
+  );
 }
 
 /** Renders the complete before and after text for every path changed by a proposal. */
@@ -1033,11 +1051,15 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     }
     if (record.status === 'succeeded' && record.result) {
       const recoveredSha = await transactor.findOperationCommit(record.requestId, record.digest);
-      if (
-        recoveredSha &&
-        String((record.result._meta ?? {})['commitSha'] ?? '') === recoveredSha
-      ) {
-        return record.result;
+      const recordedSha = recordedCommitSha(record);
+      if (recoveredSha && recordedSha === recoveredSha) {
+        if (record.commitSha !== recoveredSha) {
+          // Records written before the public receipt fields existed still carry the
+          // commit in result metadata. Replaying one upgrades its durable evidence.
+          record.commitSha = recoveredSha;
+          await operationStore.write(record);
+        }
+        return operationResult(record);
       }
       return errorResult('the completed operation record does not match canonical Git history');
     }
@@ -1047,15 +1069,18 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       if (recoveredSha) {
         record.status = 'succeeded';
         record.error = undefined;
+        record.commitSha = recoveredSha;
+        record.completedAt = new Date().toISOString();
         record.result = textResult(`Prepared ${record.operation} already succeeded`, {
           commitSha: recoveredSha,
         });
         await operationStore.write(record);
-        return record.result;
+        return operationResult(record);
       }
     }
     if (Date.now() > Date.parse(record.expiresAt)) {
       record.status = 'expired';
+      record.completedAt = new Date().toISOString();
       record.error = 'the prepared operation expired before execution';
       await operationStore.write(record);
       return errorResult(record.error);
@@ -1065,6 +1090,8 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     }
 
     record.status = 'running';
+    record.startedAt ??= new Date().toISOString();
+    record.completedAt = undefined;
     record.error = undefined;
     await operationStore.write(record);
     const message =
@@ -1086,23 +1113,36 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
           : err instanceof ConflictError
             ? 'stale'
             : 'failed';
+      if (record.status !== 'indeterminate') {
+        record.completedAt = new Date().toISOString();
+      }
       record.error = err instanceof Error ? err.message : String(err);
       await operationStore.write(record);
       return errorResult(record.error);
     }
     if (result.isError) {
       record.status = 'failed';
+      record.completedAt = new Date().toISOString();
       record.error = textOf(result);
       await operationStore.write(record);
       return result;
+    }
+    const commitSha = String((result._meta ?? {})['commitSha'] ?? '');
+    if (!/^[0-9a-f]{40}$/.test(commitSha)) {
+      record.status = 'indeterminate';
+      record.error = 'the pushed operation did not return a valid commit SHA';
+      await operationStore.write(record);
+      return errorResult(record.error);
     }
     // This seam models a process dying after GitHub accepted the push but before the
     // durable operation record was replaced. A retry recovers through the commit trailers.
     await config.testHooks?.afterPreparedPush?.();
     record.status = 'succeeded';
+    record.commitSha = commitSha;
+    record.completedAt = new Date().toISOString();
     record.result = result;
     await operationStore.write(record);
-    return result;
+    return operationResult(record);
   };
 
   const executingOperations = new Map<string, Promise<CallToolResult>>();
@@ -1188,7 +1228,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         const requestId = stringArg(args, 'requestId');
         const record = await operationStore.get(requestId);
         return record
-          ? textResult(JSON.stringify(publicOperation(record), null, 2))
+          ? operationResult(record)
           : errorResult(`prepared operation not found: ${requestId}`);
       }
       if (name === 'vault_health') {

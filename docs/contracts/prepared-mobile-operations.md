@@ -27,7 +27,7 @@ The successful response records:
 Preparation refreshes from the canonical branch before capturing its base commit. It never changes the remote repository. Records expire after 15 minutes.
 An exact preview larger than 1 MiB is refused instead of being truncated.
 
-`execute_vault_change` accepts only `requestId`. It fetches and fast-forwards under the transaction lock, refuses execution when remote `main` no longer equals `baseHeadSha`, applies the recorded arguments, validates the result, commits, pushes, and returns the pushed commit SHA. The commit contains:
+`execute_vault_change` accepts only `requestId`. It fetches and fast-forwards under the transaction lock, refuses execution when remote `main` no longer equals `baseHeadSha`, applies the recorded arguments, validates the result, commits, and pushes. Its visible receipt includes the final status, pushed commit SHA, and execution timestamps. The commit contains:
 
 ```text
 Vault-Request-Id: <requestId>
@@ -37,7 +37,7 @@ Vault-Operation-Digest: <digest>
 
 The operation store uses owner-only permissions and atomic JSON replacement outside the vault. A completed replay returns the stored result only after its commit SHA and exact trailers match canonical Git history. If the service stops after a successful push but before recording success, the retry searches the canonical branch for an exact request-ID and digest trailer pair, records the recovered commit, and returns it without applying the mutation again.
 
-`get_vault_operation` returns the public status and preview fields without returning the recorded arguments. `vault_health` reports prepared-mode availability and Git synchronization state without exposing vault contents or local paths.
+`get_vault_operation` returns the same public receipt and preview fields without returning the recorded arguments. Execution, replay, and status lookup therefore expose the same final status and commit evidence. `vault_health` reports prepared-mode availability and Git synchronization state without exposing vault contents or local paths.
 
 ## Denied surface
 

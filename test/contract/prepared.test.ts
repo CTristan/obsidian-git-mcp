@@ -108,6 +108,27 @@ describe('prepared mobile writes', () => {
     expect(executed.isError, textOf(executed)).toBeFalsy();
     const sha = commitShaOf(executed);
     expect(sha).toBe(await fx.bareHead());
+    const receipt = JSON.parse(textOf(executed)) as {
+      requestId: string;
+      status: string;
+      commitSha: string;
+      startedAt: string;
+      completedAt: string;
+    };
+    expect(receipt).toMatchObject({
+      requestId: preview.requestId,
+      status: 'succeeded',
+      commitSha: sha,
+    });
+    expect(Date.parse(receipt.startedAt)).not.toBeNaN();
+    expect(Date.parse(receipt.completedAt)).not.toBeNaN();
+    expect(Date.parse(receipt.completedAt)).toBeGreaterThanOrEqual(Date.parse(receipt.startedAt));
+
+    const status = await callTool(srv.client, 'get_vault_operation', {
+      requestId: preview.requestId,
+    });
+    expect(status.isError, textOf(status)).toBeFalsy();
+    expect(JSON.parse(textOf(status))).toMatchObject(receipt);
     expect(await fx.remoteFile('Projects/Alpha.md')).toContain('Mobile canary.');
 
     const message = await git(['log', '-1', '--format=%B', 'main'], fx.bareDir);
@@ -134,8 +155,47 @@ describe('prepared mobile writes', () => {
     const replay = await callTool(srv.client, 'execute_vault_change', { requestId });
     expect(replay.isError, textOf(replay)).toBeFalsy();
     expect(commitShaOf(replay)).toBe(firstHead);
+    expect(JSON.parse(textOf(replay))).toMatchObject({
+      requestId,
+      status: 'succeeded',
+      commitSha: firstHead,
+    });
     expect(await fx.bareHead()).toBe(firstHead);
     expect((await fx.remoteFile('Projects/Alpha.md')).match(/Replay-safe canary\./g)).toHaveLength(1);
+  });
+
+  it('repairs a legacy success record with commit evidence on replay', async () => {
+    const prepared = await callTool(srv.client, 'prepare_vault_change', {
+      operation: 'append_to_section',
+      arguments: {
+        path: 'Projects/Alpha.md',
+        heading: 'Status',
+        text: 'Legacy receipt canary.',
+      },
+    });
+    const requestId = (JSON.parse(textOf(prepared)) as { requestId: string }).requestId;
+    const first = await callTool(srv.client, 'execute_vault_change', { requestId });
+    expect(first.isError, textOf(first)).toBeFalsy();
+    const pushedHead = await fx.bareHead();
+
+    const statePath = join(fx.root, 'operations', `${requestId}.json`);
+    const legacy = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>;
+    delete legacy['commitSha'];
+    delete legacy['startedAt'];
+    delete legacy['completedAt'];
+    await writeFile(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    const replay = await callTool(srv.client, 'execute_vault_change', { requestId });
+    expect(replay.isError, textOf(replay)).toBeFalsy();
+    expect(JSON.parse(textOf(replay))).toMatchObject({
+      requestId,
+      status: 'succeeded',
+      commitSha: pushedHead,
+    });
+    expect(await fx.bareHead()).toBe(pushedHead);
+
+    const repaired = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>;
+    expect(repaired['commitSha']).toBe(pushedHead);
   });
 
   it('coalesces concurrent execution retries into one pushed commit', async () => {
@@ -197,6 +257,11 @@ describe('prepared mobile writes', () => {
     const recovered = await callTool(srv.client, 'execute_vault_change', { requestId });
     expect(recovered.isError, textOf(recovered)).toBeFalsy();
     expect(commitShaOf(recovered)).toBe(pushedHead);
+    expect(JSON.parse(textOf(recovered))).toMatchObject({
+      requestId,
+      status: 'succeeded',
+      commitSha: pushedHead,
+    });
     expect(await fx.bareHead()).toBe(pushedHead);
     expect((await fx.remoteFile('Projects/Alpha.md')).match(/Recovered canary\./g)).toHaveLength(1);
   });
