@@ -30,7 +30,7 @@ OGM_OPERATION_STATE_DIR=<codex-operation-state> \
 node <obsidian-git-mcp>/dist/cli.js <codex-vault-clone>
 ```
 
-The personal `obsidian-vault` plugin wraps this stdio launch. Its launcher reads the concrete paths from `OBSIDIAN_GIT_MCP_ROOT`, `OBSIDIAN_GIT_MCP_VAULT`, and `OBSIDIAN_GIT_MCP_STATE`, so the plugin contains no repository credential or vault content.
+The personal `obsidian-vault` plugin wraps this stdio launch. Its launcher defaults to `~/.local/share/obsidian-git-mcp/server`, `~/.local/share/obsidian-git-mcp/codex/vault`, and `~/.local/share/obsidian-git-mcp/codex/operations`. `OBSIDIAN_GIT_MCP_ROOT`, `OBSIDIAN_GIT_MCP_VAULT`, and `OBSIDIAN_GIT_MCP_STATE` override those paths without putting a repository credential or vault content in the plugin.
 
 ## Mobile tunnel path
 
