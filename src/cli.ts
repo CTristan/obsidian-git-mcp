@@ -15,6 +15,15 @@ const rawCollaborator =
 const collaborator =
   rawCollaborator.replace(/[<>\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() ||
   fail('OGM_COLLABORATOR must contain a valid git author name');
+const rawAccessMode = process.env['OGM_ACCESS_MODE']?.trim() || 'direct';
+if (rawAccessMode !== 'direct' && rawAccessMode !== 'prepared') {
+  fail('OGM_ACCESS_MODE must be direct or prepared');
+}
+const accessMode: 'direct' | 'prepared' = rawAccessMode;
+const operationStateDir = process.env['OGM_OPERATION_STATE_DIR']?.trim();
+if (accessMode === 'prepared' && !operationStateDir) {
+  fail('OGM_OPERATION_STATE_DIR is required when OGM_ACCESS_MODE=prepared');
+}
 
 // Fall back to a fixed slug when the name has no alphanumerics at all, because an
 // empty local part would make the default author email malformed.
@@ -38,6 +47,8 @@ try {
     branch: process.env['OGM_BRANCH']?.trim() || 'main',
     remote: process.env['OGM_REMOTE']?.trim() || 'origin',
     allowDestructive: process.env['OGM_ALLOW_DESTRUCTIVE'] === '1',
+    accessMode,
+    operationStateDir,
   });
   let stopping = false;
   const shutdown = (): void => {

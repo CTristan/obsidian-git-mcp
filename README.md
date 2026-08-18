@@ -10,6 +10,7 @@ An MCP server for git-backed Obsidian vaults. Every write an AI collaborator mak
 - Refuses conflicting concurrent edits instead of guessing a merge. A push race with a non-conflicting remote commit retries a bounded number of times; an actual conflict stops immediately.
 - Attributes each commit to the collaborator that made it, so `git log --author=ChatGPT` is the audit trail. The service itself stays the committer.
 - Adds the wrapper-native tools MCPVault doesn't have: `vault_status`, `list_recent_changes`, `append_to_section`, `resolve_wikilink`, and `get_backlinks`.
+- Offers a prepared access mode for remote/mobile clients: preview one constrained change, then execute that exact request once against its recorded base commit.
 - Ships destructive tools (`delete_note`, `move_note`, `move_file`) disabled by default, and denies `.obsidian/` writes and path traversal at both the path-filter and transaction layers.
 
 ## Why create this?
@@ -66,12 +67,16 @@ The server speaks MCP over stdio. Configuration comes from environment variables
 | `OGM_BRANCH` | `main` | Branch the transaction wrapper syncs and pushes |
 | `OGM_REMOTE` | `origin` | Remote the transaction wrapper fetches and pushes |
 | `OGM_ALLOW_DESTRUCTIVE` | unset | Set to `1` to expose `delete_note`, `move_note`, and `move_file` |
+| `OGM_ACCESS_MODE` | `direct` | Set to `prepared` to hide direct mutations and expose preview/execute operations |
+| `OGM_OPERATION_STATE_DIR` | *(required in prepared mode)* | Owner-only directory outside the vault for durable replay state |
 
 Example Claude Code registration:
 
 ```sh
 claude mcp add vault -e OGM_COLLABORATOR="Claude Code" -- node /path/to/obsidian-git-mcp/dist/cli.js /path/to/vault-checkout
 ```
+
+For a private mobile transport, run a separate service checkout in prepared mode. That surface keeps reads, `prepare_vault_change`, `execute_vault_change`, `get_vault_operation`, and `vault_health`, while refusing direct and destructive mutations even when a client calls them without discovery. The exact request contract lives in [the prepared mobile operations contract](docs/contracts/prepared-mobile-operations.md), and the Mac pilot procedure lives in [the private mobile pilot runbook](docs/runbooks/private-mobile-pilot.md).
 
 ## Behavior notes
 

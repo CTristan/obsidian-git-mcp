@@ -46,6 +46,11 @@ export interface ReadSnapshot {
   dirty: boolean;
 }
 
+export interface TransactionOptions {
+  /** Refuse the mutation when the fetched canonical branch no longer matches this commit. */
+  expectedHeadSha?: string;
+}
+
 /**
  * Server composition details for the internal transaction primitive.
  *
@@ -716,7 +721,11 @@ export class Transactor {
   }
 
   /** Run one mutation as a full transaction. Returns the pushed commit SHA and the mutation's result. */
-  transact<T>(message: string, mutate: () => Promise<T>): Promise<{ sha: string; result: T }> {
+  transact<T>(
+    message: string,
+    mutate: () => Promise<T>,
+    options: TransactionOptions = {},
+  ): Promise<{ sha: string; result: T }> {
     return this.enqueue(async () => {
       this.invalidateGitExecutionConfig();
       // acquireLock sits outside the try: a failed acquire must never reach the finally,
@@ -742,6 +751,11 @@ export class Transactor {
         // readNote() parses frontmatter through gray-matter's default (unsafe) engines.
         await this.refuseUnvalidatedFetchedNotes();
         rollbackTo = await this.git(['rev-parse', 'HEAD']);
+        if (options.expectedHeadSha !== undefined && rollbackTo !== options.expectedHeadSha) {
+          throw new ConflictError(
+            `the prepared change is stale: expected ${options.expectedHeadSha}, current ${rollbackTo}`,
+          );
+        }
         const ignoredBefore = await this.ignoredFiles();
         const ignoredBeforeFingerprint = await this.ignoredFingerprint(ignoredBefore);
 
@@ -821,6 +835,31 @@ export class Transactor {
         await this.releaseLock();
       }
     });
+  }
+
+  /** Finds a previously pushed prepared operation by its exact request and digest trailers. */
+  async findOperationCommit(requestId: string, digest: string): Promise<string | undefined> {
+    const { result } = await this.readTransaction(async () => {
+      const matches = await this.git([
+        'log',
+        this.target(),
+        '--format=%H',
+        '--fixed-strings',
+        `--grep=Vault-Request-Id: ${requestId}`,
+      ]);
+      for (const sha of matches.split(/\r?\n/).filter((value) => value !== '')) {
+        const body = await this.git(['show', '-s', '--format=%B', sha]);
+        const lines = new Set(body.split(/\r?\n/));
+        if (
+          lines.has(`Vault-Request-Id: ${requestId}`) &&
+          lines.has(`Vault-Operation-Digest: ${digest}`)
+        ) {
+          return sha;
+        }
+      }
+      return undefined;
+    });
+    return result;
   }
 
   /**

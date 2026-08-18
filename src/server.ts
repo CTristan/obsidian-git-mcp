@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { readFile, readlink, realpath, rm, type FileHandle } from 'node:fs/promises';
+import { access, readFile, readlink, realpath, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createServer as createMcpVaultServer } from '@bitbonsai/mcpvault';
@@ -16,6 +16,13 @@ import {
 import { appendToSection } from './append.js';
 import { mapWithConcurrency } from './concurrency.js';
 import { runGit } from './git.js';
+import {
+  OperationStore,
+  operationDigest,
+  PREPARED_OPERATIONS,
+  type PreparedOperationName,
+  type VaultOperationRecord,
+} from './operations.js';
 import { forbiddenPathReason } from './paths.js';
 import {
   applyCloneDiff,
@@ -25,7 +32,14 @@ import {
   openPinnedHandle,
   writeAllAt,
 } from './staging.js';
-import { Transactor, type Identity, type ReadSnapshot } from './transaction.js';
+import {
+  ConflictError,
+  IndeterminatePushError,
+  Transactor,
+  type Identity,
+  type ReadSnapshot,
+  type TransactionOptions,
+} from './transaction.js';
 import { refuseExecutableFrontmatter, validateNoteContent, ValidationError } from './validate.js';
 import {
   backlinksFor,
@@ -67,6 +81,7 @@ function isFrontmatterParsedFile(path: string): boolean {
 // regardless of what MCPVault will parse frontmatter on.
 const MARKDOWN_NOTE_EXTENSIONS = ['.md', '.markdown'];
 const WIKILINK_INDEX_READ_CONCURRENCY = 64;
+const MAX_PREVIEW_BYTES = 1024 * 1024;
 
 function isMarkdownNote(path: string): boolean {
   const lower = path.toLowerCase();
@@ -89,7 +104,22 @@ const READ_TOOLS = new Set([
 const WRITE_TOOLS = new Set(['write_note', 'patch_note', 'update_frontmatter', 'manage_tags']);
 const DESTRUCTIVE_TOOLS = new Set(['delete_note', 'move_note', 'move_file']);
 
-const WRAPPER_TOOLS: Tool[] = [
+const READ_ANNOTATIONS = {
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+  readOnlyHint: true,
+} as const;
+const WRITE_ANNOTATIONS = {
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+  readOnlyHint: false,
+} as const;
+const EXECUTE_ANNOTATIONS = { ...WRITE_ANNOTATIONS, idempotentHint: true } as const;
+const DESTRUCTIVE_ANNOTATIONS = { ...WRITE_ANNOTATIONS, destructiveHint: true } as const;
+
+const READ_WRAPPER_TOOLS: Tool[] = [
   {
     name: 'vault_status',
     description:
@@ -105,20 +135,6 @@ const WRAPPER_TOOLS: Tool[] = [
         limit: { type: 'integer', description: 'Maximum commits to return (default 20)' },
         path: { type: 'string', description: 'Restrict history to this vault path' },
       },
-    },
-  },
-  {
-    name: 'append_to_section',
-    description:
-      'Append text under a named heading of a note. Creates the section at the end of the note when the heading is absent.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Vault-relative note path' },
-        heading: { type: 'string', description: 'Heading text (without the # marks)' },
-        text: { type: 'string', description: 'Text to append' },
-      },
-      required: ['path', 'heading', 'text'],
     },
   },
   {
@@ -150,6 +166,67 @@ const WRAPPER_TOOLS: Tool[] = [
   },
 ];
 
+const APPEND_TOOL: Tool = {
+  name: 'append_to_section',
+  description:
+    'Append text under a named heading of a note. Creates the section at the end of the note when the heading is absent.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Vault-relative note path' },
+      heading: { type: 'string', description: 'Heading text (without the # marks)' },
+      text: { type: 'string', description: 'Text to append' },
+    },
+    required: ['path', 'heading', 'text'],
+  },
+  annotations: WRITE_ANNOTATIONS,
+};
+
+const PREPARED_TOOLS: Tool[] = [
+  {
+    name: 'prepare_vault_change',
+    description: 'Validate and preview one non-destructive vault change without modifying the vault.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: [...PREPARED_OPERATIONS] },
+        arguments: { type: 'object', additionalProperties: true },
+      },
+      required: ['operation', 'arguments'],
+      additionalProperties: false,
+    },
+    annotations: { ...READ_ANNOTATIONS, idempotentHint: false },
+  },
+  {
+    name: 'execute_vault_change',
+    description: 'Execute one previously prepared change exactly once against its recorded base commit.',
+    inputSchema: {
+      type: 'object',
+      properties: { requestId: { type: 'string', format: 'uuid' } },
+      required: ['requestId'],
+      additionalProperties: false,
+    },
+    annotations: EXECUTE_ANNOTATIONS,
+  },
+  {
+    name: 'get_vault_operation',
+    description: 'Report the durable status of one prepared vault operation.',
+    inputSchema: {
+      type: 'object',
+      properties: { requestId: { type: 'string', format: 'uuid' } },
+      required: ['requestId'],
+      additionalProperties: false,
+    },
+    annotations: READ_ANNOTATIONS,
+  },
+  {
+    name: 'vault_health',
+    description: 'Report whether the vault transport and prepared-operation boundary are healthy.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: READ_ANNOTATIONS,
+  },
+];
+
 export interface VaultServerConfig {
   /** Path to a plain git clone of the vault. Never a live Obsidian directory. */
   vaultPath: string;
@@ -165,8 +242,12 @@ export interface VaultServerConfig {
   readFreshnessMs?: number;
   /** Extra push attempts after a clean push race. Default 2. */
   maxPushRetries?: number;
+  /** Direct tools for trusted local clients, or prepared-only mutation tools for mobile clients. */
+  accessMode?: 'direct' | 'prepared';
+  /** Durable replay state outside the vault. Required in prepared mode. */
+  operationStateDir?: string;
   /** Test seams. Not for production use. */
-  testHooks?: { beforePush?: () => Promise<void> };
+  testHooks?: { beforePush?: () => Promise<void>; afterPreparedPush?: () => Promise<void> };
 }
 
 export interface VaultServer {
@@ -218,6 +299,116 @@ function commitMessageFor(tool: string, args: Record<string, unknown>): string {
     return `${tool}: ${stringArg(args, 'oldPath')} -> ${stringArg(args, 'newPath')}`;
   }
   return `${tool}: ${stringArg(args, 'path') || '(multiple)'}`;
+}
+
+const PREPARED_ARGUMENT_KEYS: Record<PreparedOperationName, ReadonlySet<string>> = {
+  create_note: new Set(['path', 'content', 'frontmatter']),
+  patch_note: new Set(['path', 'oldString', 'newString', 'replaceAll']),
+  update_frontmatter: new Set(['path', 'frontmatter', 'merge']),
+  manage_tags: new Set(['path', 'operation', 'tags']),
+  append_to_section: new Set(['path', 'heading', 'text']),
+};
+
+/** Extracts one plain object argument and rejects scalar or array substitutes. */
+function recordArg(args: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = args[key];
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    throw new InnerToolError(`${key} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Validates a public prepared request and maps it to the existing internal write tool. */
+function normalizePreparedChange(args: Record<string, unknown>): {
+  operation: PreparedOperationName;
+  arguments: Record<string, unknown>;
+  tool: string;
+  toolArguments: Record<string, unknown>;
+} {
+  for (const key of Object.keys(args)) {
+    if (key !== 'operation' && key !== 'arguments') {
+      throw new InnerToolError(`prepare_vault_change: unsupported argument ${key}`);
+    }
+  }
+  const operation = stringArg(args, 'operation');
+  if (!PREPARED_OPERATIONS.includes(operation as PreparedOperationName)) {
+    throw new InnerToolError(`unsupported prepared operation: ${operation || '(missing)'}`);
+  }
+  const preparedOperation = operation as PreparedOperationName;
+  const operationArguments = recordArg(args, 'arguments');
+  const supported = PREPARED_ARGUMENT_KEYS[preparedOperation];
+  for (const key of Object.keys(operationArguments)) {
+    if (!supported.has(key)) {
+      throw new InnerToolError(`${preparedOperation}: unsupported argument ${key}`);
+    }
+  }
+  const path = stringArg(operationArguments, 'path');
+  if (!path) throw new InnerToolError(`${preparedOperation}: path is required`);
+
+  if (preparedOperation === 'create_note') {
+    if (typeof operationArguments['content'] !== 'string') {
+      throw new InnerToolError('create_note: content is required and must be a string');
+    }
+    return {
+      operation: preparedOperation,
+      arguments: { ...operationArguments },
+      tool: 'write_note',
+      toolArguments: { ...operationArguments, mode: 'overwrite' },
+    };
+  }
+  return {
+    operation: preparedOperation,
+    arguments: { ...operationArguments },
+    tool: preparedOperation,
+    toolArguments: { ...operationArguments },
+  };
+}
+
+/** Removes executable arguments and internal fields from a public operation response. */
+function publicOperation(record: VaultOperationRecord): Record<string, unknown> {
+  return {
+    requestId: record.requestId,
+    operation: record.operation,
+    baseHeadSha: record.baseHeadSha,
+    digest: record.digest,
+    affectedPaths: record.affectedPaths,
+    preview: record.preview,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    status: record.status,
+    error: record.error,
+  };
+}
+
+/** Renders the complete before and after text for every path changed by a proposal. */
+async function exactContentPreview(
+  beforeRoot: string,
+  afterRoot: string,
+  affectedPaths: readonly string[],
+): Promise<string> {
+  const readOrEmpty = async (root: string, path: string): Promise<string> => {
+    try {
+      return await readFile(resolve(root, path), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
+      throw err;
+    }
+  };
+  const chunks: string[] = [];
+  for (const path of affectedPaths) {
+    const [before, after] = await Promise.all([
+      readOrEmpty(beforeRoot, path),
+      readOrEmpty(afterRoot, path),
+    ]);
+    const removed = before.split('\n').map((line) => `-${line}`).join('\n');
+    const added = after.split('\n').map((line) => `+${line}`).join('\n');
+    chunks.push(`--- a/${path}\n+++ b/${path}\n${removed}\n${added}`);
+  }
+  const preview = chunks.join('\n');
+  if (Buffer.byteLength(preview, 'utf8') > MAX_PREVIEW_BYTES) {
+    throw new InnerToolError('the exact preview exceeds the 1 MiB prepared-change limit');
+  }
+  return preview;
 }
 
 /** Raised when the inner MCPVault tool itself rejected the call mid-transaction. */
@@ -400,6 +591,21 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   const branch = config.branch ?? 'main';
   const remote = config.remote ?? 'origin';
   const allowDestructive = config.allowDestructive ?? false;
+  const accessMode = config.accessMode ?? 'direct';
+  if (accessMode === 'prepared' && !config.operationStateDir) {
+    throw new Error('operationStateDir is required in prepared mode');
+  }
+  const operationStatePath = config.operationStateDir
+    ? resolve(config.operationStateDir)
+    : undefined;
+  const operationStore = operationStatePath ? new OperationStore(operationStatePath) : undefined;
+  if (
+    accessMode === 'prepared' &&
+    (Buffer.byteLength(config.collaborator.name, 'utf8') > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(config.collaborator.name))
+  ) {
+    throw new Error('the prepared-mode collaborator name must be one line of at most 128 bytes');
+  }
   const service = config.service ?? {
     name: 'obsidian-git-mcp',
     email: 'service@obsidian-git-mcp.local',
@@ -410,6 +616,15 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   // Canonical vault root for symlink-containment checks (the configured path itself may
   // sit behind a symlink, e.g. /tmp on macOS).
   const realVaultPath = await realpath(vaultPath);
+  if (operationStatePath) {
+    const realStatePath = await realpathNearestAncestor(operationStatePath);
+    if (
+      realStatePath === realVaultPath ||
+      realStatePath.startsWith(`${realVaultPath}${sep}`)
+    ) {
+      throw new Error('the operation state directory must stay outside the vault checkout');
+    }
+  }
 
   const transactor = new Transactor({
     vaultPath,
@@ -563,6 +778,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
   const forwardWrite = async (
     name: string,
     args: Record<string, unknown>,
+    transaction: TransactionOptions & { message?: string } = {},
   ): Promise<CallToolResult> => {
     // Preflight the path arguments before anything touches MCPVault — the path-filter
     // layer must refuse on its own, not lean on the post-mutation transaction check.
@@ -575,7 +791,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         }
       }
     }
-    const { sha, result } = await transactor.transact(commitMessageFor(name, args), async () => {
+    const { sha, result } = await transactor.transact(transaction.message ?? commitMessageFor(name, args), async () => {
       // Delegated writes never touch the live vault directly. We clone the fast-forwarded
       // worktree into an ephemeral 0700 dir, run a throwaway MCPVault against the clone,
       // then copy only the changed bytes back through fd-pinned writes. This narrows the
@@ -619,11 +835,14 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         await rm(stage, { recursive: true, force: true }).catch(() => undefined);
         throw err;
       }
-    });
+    }, transaction);
     return { ...result, _meta: { ...(result._meta ?? {}), commitSha: sha } };
   };
 
-  const appendTool = async (args: Record<string, unknown>): Promise<CallToolResult> => {
+  const appendTool = async (
+    args: Record<string, unknown>,
+    transaction: TransactionOptions & { message?: string } = {},
+  ): Promise<CallToolResult> => {
     const path = stringArg(args, 'path');
     const heading = stringArg(args, 'heading');
     const text = stringArg(args, 'text');
@@ -649,7 +868,7 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     if (!absPath.startsWith(vaultPath + sep)) {
       return errorResult(`${path}: path escapes the vault`);
     }
-    const { sha } = await transactor.transact(`append_to_section: ${path} (${heading})`, async () => {
+    const { sha } = await transactor.transact(transaction.message ?? `append_to_section: ${path} (${heading})`, async () => {
       // Symlink containment runs INSIDE the transaction, after fetch/fast-forward, so
       // it also covers a symlink that only just arrived from the remote. Unlike the
       // MCPVault-forwarded tools (which realpath-guard upstream), this tool touches the
@@ -692,8 +911,212 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
       } finally {
         await handle?.close();
       }
-    });
+    }, transaction);
     return textResult(`Appended to "${heading}" in ${path}`, { commitSha: sha });
+  };
+
+  const previewPreparedChange = async (
+    rawArgs: Record<string, unknown>,
+  ): Promise<CallToolResult> => {
+    if (!operationStore) throw new InnerToolError('prepared operation storage is unavailable');
+    const normalized = normalizePreparedChange(rawArgs);
+    const { headSha, result } = await transactor.readTransaction(async () => {
+      const stage = await cloneWorktree(vaultPath);
+      try {
+        const realStage = await realpath(stage);
+        await assertWriteDestinationsContained(normalized.toolArguments, '', stage, realStage);
+        const before = await manifestOf(stage);
+        if (normalized.operation === 'create_note') {
+          try {
+            await access(resolve(stage, stringArg(normalized.arguments, 'path')));
+            throw new InnerToolError(
+              `${stringArg(normalized.arguments, 'path')}: note already exists`,
+            );
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          }
+        }
+        if (normalized.operation === 'append_to_section') {
+          const path = stringArg(normalized.arguments, 'path');
+          const heading = stringArg(normalized.arguments, 'heading');
+          const text = stringArg(normalized.arguments, 'text');
+          if (!heading.trim() || !text) {
+            throw new InnerToolError('append_to_section: heading and text must be non-empty');
+          }
+          if (!isMarkdownNote(path)) {
+            throw new InnerToolError(
+              `${path}: append_to_section only writes note files (${MARKDOWN_NOTE_EXTENSIONS.join(', ')})`,
+            );
+          }
+          const destination = await realpath(resolve(stage, path)).catch((err: unknown) => {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+              throw new InnerToolError(`${path}: note not found`);
+            }
+            throw err;
+          });
+          const reason = containmentReason(realStage, destination);
+          if (reason) throw new InnerToolError(`${path}: ${reason}`);
+          const content = await readFile(destination, 'utf8');
+          await writeFile(destination, appendToSection(content, heading, text));
+        } else {
+          await callStagedTool(stage, normalized.tool, normalized.toolArguments);
+        }
+        const after = await manifestOf(stage);
+        const affectedPaths = changedManifestPaths(before, after).sort();
+        if (affectedPaths.length === 0) {
+          throw new InnerToolError(`${normalized.operation}: the proposed change has no effect`);
+        }
+        await transactor.refuseIgnoredPaths(affectedPaths);
+        for (const relPath of affectedPaths) {
+          const reason = forbiddenPathReason(relPath);
+          if (reason) throw new ValidationError(`${relPath}: ${reason}`);
+          if (isFrontmatterParsedFile(relPath)) {
+            validateNoteContent(relPath, await readFile(resolve(stage, relPath), 'utf8'));
+          }
+        }
+        const preview = await exactContentPreview(vaultPath, stage, affectedPaths);
+        return { normalized, affectedPaths, preview };
+      } finally {
+        await rm(stage, { recursive: true, force: true });
+      }
+    });
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 15 * 60_000);
+    const digest = operationDigest({
+      actor: config.collaborator.name,
+      baseHeadSha: headSha,
+      operation: result.normalized.operation,
+      arguments: result.normalized.arguments,
+    });
+    const record = await operationStore.create({
+      actor: config.collaborator.name,
+      operation: result.normalized.operation,
+      arguments: result.normalized.arguments,
+      baseHeadSha: headSha,
+      digest,
+      affectedPaths: result.affectedPaths,
+      preview: result.preview,
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    });
+    return textResult(JSON.stringify(publicOperation(record), null, 2));
+  };
+
+  const executePreparedChangeOnce = async (args: Record<string, unknown>): Promise<CallToolResult> => {
+    if (!operationStore) throw new InnerToolError('prepared operation storage is unavailable');
+    for (const key of Object.keys(args)) {
+      if (key !== 'requestId') {
+        throw new InnerToolError(`execute_vault_change: unsupported argument ${key}`);
+      }
+    }
+    const requestId = stringArg(args, 'requestId');
+    const record = await operationStore.get(requestId);
+    if (!record) return errorResult(`prepared operation not found: ${requestId}`);
+    const normalized = normalizePreparedChange({
+      operation: record.operation,
+      arguments: record.arguments,
+    });
+    const expectedDigest = operationDigest({
+      actor: record.actor,
+      baseHeadSha: record.baseHeadSha,
+      operation: normalized.operation,
+      arguments: normalized.arguments,
+    });
+    if (
+      record.actor !== config.collaborator.name ||
+      record.operation !== normalized.operation ||
+      record.digest !== expectedDigest
+    ) {
+      return errorResult('the prepared operation record failed its integrity check');
+    }
+    if (record.status === 'succeeded' && record.result) {
+      const recoveredSha = await transactor.findOperationCommit(record.requestId, record.digest);
+      if (
+        recoveredSha &&
+        String((record.result._meta ?? {})['commitSha'] ?? '') === recoveredSha
+      ) {
+        return record.result;
+      }
+      return errorResult('the completed operation record does not match canonical Git history');
+    }
+
+    if (record.status === 'running' || record.status === 'indeterminate') {
+      const recoveredSha = await transactor.findOperationCommit(record.requestId, record.digest);
+      if (recoveredSha) {
+        record.status = 'succeeded';
+        record.error = undefined;
+        record.result = textResult(`Prepared ${record.operation} already succeeded`, {
+          commitSha: recoveredSha,
+        });
+        await operationStore.write(record);
+        return record.result;
+      }
+    }
+    if (Date.now() > Date.parse(record.expiresAt)) {
+      record.status = 'expired';
+      record.error = 'the prepared operation expired before execution';
+      await operationStore.write(record);
+      return errorResult(record.error);
+    }
+    if (record.status !== 'prepared' && record.status !== 'running' && record.status !== 'indeterminate') {
+      return errorResult(record.error ?? `prepared operation is ${record.status}`);
+    }
+
+    record.status = 'running';
+    record.error = undefined;
+    await operationStore.write(record);
+    const message =
+      `${commitMessageFor(normalized.tool, normalized.toolArguments)}\n\n` +
+      `Vault-Request-Id: ${record.requestId}\n` +
+      `Vault-Actor: ${record.actor}\n` +
+      `Vault-Operation-Digest: ${record.digest}`;
+    let result: CallToolResult;
+    try {
+      const transaction = { expectedHeadSha: record.baseHeadSha, message };
+      result =
+        normalized.operation === 'append_to_section'
+          ? await appendTool(normalized.toolArguments, transaction)
+          : await forwardWrite(normalized.tool, normalized.toolArguments, transaction);
+    } catch (err) {
+      record.status =
+        err instanceof IndeterminatePushError
+          ? 'indeterminate'
+          : err instanceof ConflictError
+            ? 'stale'
+            : 'failed';
+      record.error = err instanceof Error ? err.message : String(err);
+      await operationStore.write(record);
+      return errorResult(record.error);
+    }
+    if (result.isError) {
+      record.status = 'failed';
+      record.error = textOf(result);
+      await operationStore.write(record);
+      return result;
+    }
+    // This seam models a process dying after GitHub accepted the push but before the
+    // durable operation record was replaced. A retry recovers through the commit trailers.
+    await config.testHooks?.afterPreparedPush?.();
+    record.status = 'succeeded';
+    record.result = result;
+    await operationStore.write(record);
+    return result;
+  };
+
+  const executingOperations = new Map<string, Promise<CallToolResult>>();
+  const executePreparedChange = async (args: Record<string, unknown>): Promise<CallToolResult> => {
+    const requestId = stringArg(args, 'requestId');
+    const existing = executingOperations.get(requestId);
+    if (existing) return await existing;
+    const execution = executePreparedChangeOnce(args);
+    executingOperations.set(requestId, execution);
+    try {
+      return await execution;
+    } finally {
+      if (executingOperations.get(requestId) === execution) {
+        executingOperations.delete(requestId);
+      }
+    }
   };
 
   const outer = new Server(
@@ -706,21 +1129,84 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     // Only classified tools are listed, so discovery always matches what's callable —
     // an unclassified tool from a future MCPVault upgrade stays hidden instead of being
     // listed and then refused on every call.
-    const wrapperToolNames = new Set(WRAPPER_TOOLS.map((tool) => tool.name));
+    const wrapperToolNames = new Set(
+      [...READ_WRAPPER_TOOLS, APPEND_TOOL, ...PREPARED_TOOLS].map((tool) => tool.name),
+    );
     const visible = tools.filter(
       (t) =>
         !wrapperToolNames.has(t.name) &&
         (READ_TOOLS.has(t.name) ||
-          WRITE_TOOLS.has(t.name) ||
-          (allowDestructive && DESTRUCTIVE_TOOLS.has(t.name))),
-    );
-    return { tools: [...visible, ...WRAPPER_TOOLS] };
+          (accessMode === 'direct' && WRITE_TOOLS.has(t.name)) ||
+          (accessMode === 'direct' && allowDestructive && DESTRUCTIVE_TOOLS.has(t.name))),
+    ).map((tool) => ({
+      ...tool,
+      annotations: READ_TOOLS.has(tool.name)
+        ? READ_ANNOTATIONS
+        : DESTRUCTIVE_TOOLS.has(tool.name)
+          ? DESTRUCTIVE_ANNOTATIONS
+          : WRITE_ANNOTATIONS,
+    }));
+    return {
+      tools:
+        accessMode === 'prepared'
+          ? [
+              ...visible,
+              ...READ_WRAPPER_TOOLS.map((tool) => ({ ...tool, annotations: READ_ANNOTATIONS })),
+              ...PREPARED_TOOLS,
+            ]
+          : [
+              ...visible,
+              ...READ_WRAPPER_TOOLS.map((tool) => ({ ...tool, annotations: READ_ANNOTATIONS })),
+              APPEND_TOOL,
+            ],
+    };
   });
 
   outer.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     try {
+      if (name === 'prepare_vault_change') {
+        if (accessMode !== 'prepared') return errorResult('prepare_vault_change is unavailable');
+        return await previewPreparedChange(args);
+      }
+      if (name === 'execute_vault_change') {
+        if (accessMode !== 'prepared') return errorResult('execute_vault_change is unavailable');
+        return await executePreparedChange(args);
+      }
+      if (name === 'get_vault_operation') {
+        if (accessMode !== 'prepared' || !operationStore) {
+          return errorResult('get_vault_operation is unavailable');
+        }
+        for (const key of Object.keys(args)) {
+          if (key !== 'requestId') {
+            return errorResult(`get_vault_operation: unsupported argument ${key}`);
+          }
+        }
+        const requestId = stringArg(args, 'requestId');
+        const record = await operationStore.get(requestId);
+        return record
+          ? textResult(JSON.stringify(publicOperation(record), null, 2))
+          : errorResult(`prepared operation not found: ${requestId}`);
+      }
+      if (name === 'vault_health') {
+        if (accessMode !== 'prepared') return errorResult('vault_health is unavailable');
+        const status = await transactor.status();
+        return textResult(
+          JSON.stringify(
+            {
+              status: status.dirty ? 'degraded' : 'ok',
+              accessMode,
+              branch: status.branch,
+              dirty: status.dirty,
+              ahead: status.ahead,
+              behind: status.behind,
+            },
+            null,
+            2,
+          ),
+        );
+      }
       if (name === 'vault_status') {
         return textResult(JSON.stringify(await transactor.status(), null, 2));
       }
@@ -739,6 +1225,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return textResult(await transactor.recentChanges(limit, path));
       }
       if (name === 'append_to_section') {
+        if (accessMode === 'prepared') {
+          return errorResult('append_to_section is unavailable in prepared mode');
+        }
         return await appendTool(args);
       }
       if (name === 'resolve_wikilink') {
@@ -766,6 +1255,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         }));
       }
       if (DESTRUCTIVE_TOOLS.has(name)) {
+        if (accessMode === 'prepared') {
+          return errorResult(`${name} is unavailable in prepared mode`);
+        }
         if (!allowDestructive) {
           return errorResult(
             `${name} is disabled by default; restart the server with OGM_ALLOW_DESTRUCTIVE=1 to enable it`,
@@ -774,6 +1266,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
         return await forwardWrite(name, args);
       }
       if (WRITE_TOOLS.has(name)) {
+        if (accessMode === 'prepared') {
+          return errorResult(`${name} is unavailable in prepared mode`);
+        }
         return await forwardWrite(name, args);
       }
       if (READ_TOOLS.has(name)) {
