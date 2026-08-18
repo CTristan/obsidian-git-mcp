@@ -24,7 +24,7 @@ The successful response records:
 - creation and expiry timestamps;
 - the `prepared` status.
 
-Preparation never changes the service checkout or remote repository. Records expire after 15 minutes.
+Preparation refreshes from the canonical branch before capturing its base commit. It never changes the remote repository. Records expire after 15 minutes.
 An exact preview larger than 1 MiB is refused instead of being truncated.
 
 `execute_vault_change` accepts only `requestId`. It fetches and fast-forwards under the transaction lock, refuses execution when remote `main` no longer equals `baseHeadSha`, applies the recorded arguments, validates the result, commits, pushes, and returns the pushed commit SHA. The commit contains:

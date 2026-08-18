@@ -49,7 +49,7 @@ The strongest simpler alternative is the existing direct tool surface, because t
 The review found four enforcement gaps and changed the proposal:
 
 - Concurrent retries in one process could both observe `prepared`, so execution now coalesces calls by `requestId` before they reach the transaction queue.
-- A same-uid local process could edit the ledger, so execution recalculates the actor-bound digest and regenerates the internal tool call from the digested public arguments instead of trusting stored internal fields.
+- A damaged or locally altered request payload could change the internal call, so execution recalculates the actor-bound digest and regenerates the internal tool call from the digested public arguments instead of trusting stored internal fields. Owner-only permissions remain the pilot's protection for mutable status and expiry fields.
 - An exact preview can disclose the entire changed note and exhaust client budgets, so the transport stays private and refuses previews above 1 MiB.
 - The tunnel runtime key authenticates the private transport, but it does not provide multi-principal vault authorization. The pilot therefore remains one actor, and broader exposure is a revisit trigger rather than an implied capability.
 

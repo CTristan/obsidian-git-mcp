@@ -632,7 +632,9 @@ export async function createVaultServer(config: VaultServerConfig): Promise<Vaul
     remote,
     collaborator: config.collaborator,
     service,
-    readFreshnessMs: config.readFreshnessMs ?? 30_000,
+    // Prepared requests bind a preview to one canonical base commit, so every read and
+    // recovery lookup in that profile refreshes first. Direct mode keeps its bounded cache.
+    readFreshnessMs: accessMode === 'prepared' ? 0 : (config.readFreshnessMs ?? 30_000),
     maxPushRetries: config.maxPushRetries ?? 2,
     beforePush: config.testHooks?.beforePush,
     validateChangedFile: async (relPath) => {
